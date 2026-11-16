@@ -3528,6 +3528,29 @@ Tested against the stand-in shop with a Sold tab whose first page of listings ha
 because the tab was open), later pages saying SOLD, "Sold" badges on tiles, and two listings for sale whose data
 already says SOLD; the earlier test (sold items off) still passes. **Not run against depop.com.**
 
+#### 7.4g-3 Depop: choose how photos are upscaled (Nov 16, 2026)
+
+"The Depop upscaling looks bad. Can you give the user the option to choose the type of upscaling?" It was fixed:
+2× with Real-ESRGAN's preferred model and **no texture kept** (plastic skin and fabric), or — without an AI
+upscaler — Lanczos plus an unsharp mask, which makes a compressed shop JPEG's blocks and halos louder.
+
+- **`mac/upscale_methods.py`** (no Qt): `methods(engine)` — every photo model of the installed upscaler as
+  `ai:<model>` (Upscayl Standard, High Fidelity, Remacri, UltraSharp… — `ai_upscale.photo_models`, labelled by
+  `MODEL_NOTES`), then three plain ones: **Clean** (Lanczos, then the brightness smoothed with `photo_edit.guided`
+  — edge-keeping, so JPEG blocks and ringing go and edges stay — and a gentle sharpen; the default without an AI
+  upscaler), **Sharp** (the old fallback) and **Soft** (bicubic, nothing added). `upscale_file(path, method,
+  factor, texture, engine)` writes in place through `batch_crop.encode_like` (format, EXIF, dates kept); an AI
+  method whose upscaler fails falls back to Clean.
+- **The window**: Upscale (on/off) · the method · **2× / 3× / 4×** · **Texture kept** 0–60% (AI only — blends the
+  plain enlargement back in, ai_upscale's `texture`) · **Preview…**: the first selected photo, fetched at its
+  largest, enlarged plainly and as chosen, side by side at 100% (`UpscalePreview`, the two sides scroll together).
+  All remembered (`depop/upscale*`). The log names the method on each file ("upscaled 3× (Soft)").
+- **`social.Options`** gained `method` / `factor` / `texture`; `social.settle` uses `upscale_methods` when a method
+  is set, so the other downloaders can offer the same choice later (they keep their old behaviour until then).
+
+Measured on a picture shrunk to half, saved as a quality-55 JPEG and enlarged back: Clean 31.3 dB, Soft 31.2,
+Sharp 30.6 (PSNR against the original). Window tested with and without the (stand-in) AI upscaler.
+
 ### 7.4h Exclusive (subscriber-only) content in the Mac's Instagram and Facebook downloaders (Nov 16, 2026)
 
 "Ensure the Facebook and Instagram downloaders are able to download 'Exclusive' posts/content that the user is

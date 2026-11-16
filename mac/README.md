@@ -1291,6 +1291,12 @@ Right-click a folder ▸ **Download ▸ Download from Depop…** (or the Downloa
    installed — the one AI Upscale 2× uses — otherwise a plain enlargement).
 5. Press **Download N Photos**.
 
+**Upscaling**: tick **Upscale** and choose how — one of the AI upscaler's models (when one is installed; the
+one AI Upscale 2× uses), or **Clean** (best for compressed shop photos: smooths JPEG blocks, keeps edges), **Sharp**
+or **Soft** — then **2×, 3× or 4×**, and for AI, how much of the photo's own **texture** to keep (more = less
+"plastic"). Select a photo and press **Preview…** to see it enlarged plainly and your way, side by side, before
+downloading anything.
+
 **Sold items**: with **Include sold items** ticked (it is to begin with), Load Whole Shop goes on into the shop's
 Sold tab once the listings for sale are in — or press **Sold Items** to open that tab yourself. Sold listings' photos
 get a yellow SOLD band, **Show:** picks Everything / For sale / Sold, and the ones you download are tagged **sold**

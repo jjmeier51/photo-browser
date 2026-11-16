@@ -74,6 +74,9 @@ class Options:
     stories: bool = True              # Instagram: current stories and highlights
     upscale_under: int = 0            # photos smaller than this (bytes) are upscaled 2× whatever photos_2x says
     full: bool = False                # Facebook: walk every set to its end, even one read before
+    method: str = ""                  # how photos are enlarged (upscale_methods: "ai:<model>", "clean", "sharp", "soft");
+    factor: int = 2                   #   "" = as before (the AI's default model, else Sharp); how many times larger;
+    texture: float = 0.0              #   and, for an AI method, how much of the plain enlargement is kept
 
 
 @dataclass
@@ -454,7 +457,11 @@ def settle(item: Item, tries: list[dict[str, str]], opts: Options, tool=None, en
             small = bool(opts.upscale_under) and os.path.getsize(path) < opts.upscale_under
             if opts.photos_2x or small:
                 with heavy or _NoLock():
-                    upscaled = upscale_photo(path, engine if opts.ai else None)
+                    if opts.method:
+                        import upscale_methods
+                        upscaled = upscale_methods.upscale_file(path, opts.method, opts.factor, opts.texture, engine)
+                    else:
+                        upscaled = upscale_photo(path, engine if opts.ai else None)
         elif opts.videos_1080:
             import video_tools
             with heavy or _NoLock():

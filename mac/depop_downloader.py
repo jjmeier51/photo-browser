@@ -38,9 +38,9 @@ sys.path.insert(0, str(HERE))
 
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal  # noqa: E402
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap  # noqa: E402
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit,  # noqa: E402
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,  # noqa: E402
                                QListView, QListWidget, QListWidgetItem, QMainWindow, QPlainTextEdit, QProgressBar,
-                               QPushButton, QSplitter, QVBoxLayout, QWidget)
+                               QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget)
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript  # noqa: E402
 from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 
@@ -205,14 +205,55 @@ class DepopWindow(QMainWindow):
                                  "ones are tagged “sold” as well as “depop”)")
         self.sold_box.setChecked(str(self.settings.value("depop/sold", "true")) == "true")
         self.sold_box.toggled.connect(lambda on: self.settings.setValue("depop/sold", "true" if on else "false"))
-        self.up_box = QCheckBox("Upscale every photo 2×")
+        self.up_box = QCheckBox("Upscale")
         self.up_box.setChecked(str(self.settings.value("depop/upscale", "false")) == "true")
-        self.up_box.toggled.connect(lambda on: self.settings.setValue("depop/upscale", "true" if on else "false"))
+        self.up_box.toggled.connect(lambda on: (self.settings.setValue("depop/upscale", "true" if on else "false"),
+                                                self._upscale_controls()))
+        self.up_box.setToolTip("Each photo is enlarged as it arrives, the way chosen beside this — try it first with "
+                               "Preview. Upscaled photos get the “upscaled” tag.")
         self.engine = self._find_engine()
-        self.up_box.setToolTip("Each photo is enlarged to twice its size as it arrives, " + (
-            f"with {self.engine.label} — Real-ESRGAN, the one AI Upscale uses." if self.engine is not None else
-            "plainly (Lanczos, lightly sharpened) — no AI upscaler is installed; AI Upscale 2× in the main window "
-            "says how to add one.") + " Upscaled photos get the “upscaled” tag.")
+        import upscale_methods
+        self.um = upscale_methods
+        self.method = QComboBox()
+        for key, text in upscale_methods.methods(self.engine):
+            self.method.addItem(text, key)
+        want = str(self.settings.value("depop/upscale_method", "") or upscale_methods.default(self.engine))
+        self.method.setCurrentIndex(max(0, self.method.findData(want)))
+        self.method.setToolTip("How photos are enlarged. AI: Real-ESRGAN on this Mac (the upscaler AI Upscale uses), "
+                               "each of its photo models" + ("" if self.engine is not None else
+                               " — none is installed; AI Upscale 2× in the main window says how to add one") +
+                               ". Clean suits compressed shop photos; Sharp and Soft are plain enlargements.")
+        self.method.currentIndexChanged.connect(lambda _i: (self.settings.setValue("depop/upscale_method",
+                                                                                   self.method.currentData()),
+                                                            self._upscale_controls()))
+        self.factor = QComboBox()
+        for f in (2, 3, 4):
+            self.factor.addItem(f"{f}×", f)
+        try:
+            self.factor.setCurrentIndex(max(0, self.factor.findData(int(self.settings.value("depop/upscale_factor", 2)))))
+        except (TypeError, ValueError):
+            pass
+        self.factor.currentIndexChanged.connect(lambda _i: self.settings.setValue("depop/upscale_factor",
+                                                                                  self.factor.currentData()))
+        self.texture = QComboBox()
+        for pct in (0, 15, 25, 40, 60):
+            self.texture.addItem(f"Texture kept: {pct}%", pct / 100)
+        try:
+            tex = float(self.settings.value("depop/upscale_texture", upscale_methods.TEXTURE))
+        except (TypeError, ValueError):
+            tex = upscale_methods.TEXTURE
+        self.texture.setCurrentIndex(min(range(self.texture.count()), key=lambda i: abs(self.texture.itemData(i) - tex)))
+        self.texture.setToolTip("AI upscaling smooths as it sharpens; this blends some of a plain enlargement back in, "
+                                "so skin and fabric keep their grain instead of looking plastic.")
+        self.texture.currentIndexChanged.connect(lambda _i: self.settings.setValue("depop/upscale_texture",
+                                                                                   self.texture.currentData()))
+        self.preview_btn = QPushButton("Preview…")
+        self.preview_btn.setToolTip("Tries this upscale on the first selected photo and shows it beside the plain "
+                                    "photo at the same size — before anything is downloaded")
+        self.preview_btn.clicked.connect(self.preview_upscale)
+        self.previewing = False
+        self.up_label = ""
+        self._upscale_controls()
         self.go = QPushButton("Download")
         self.go.setObjectName("Primary")
         self.go.setDefault(True)
@@ -226,6 +267,8 @@ class DepopWindow(QMainWindow):
         opts.addWidget(self.sold_box)
         opts.addSpacing(18)
         opts.addWidget(self.up_box)
+        for w in (self.method, self.factor, self.texture, self.preview_btn):
+            opts.addWidget(w)
         opts.addStretch(1)
         opts.addWidget(self.stop_btn)
         opts.addWidget(self.go)
@@ -269,6 +312,67 @@ class DepopWindow(QMainWindow):
         self._count()
 
     # ------------------------------------------------------------------ small helpers
+    # ------------------------------------------------------------------ upscaling: the choice and its preview
+    def _upscale_controls(self) -> None:
+        on = self.up_box.isChecked()
+        for w in (self.method, self.factor, self.preview_btn):
+            w.setEnabled(on)
+        self.texture.setEnabled(on and self.um.is_ai(self.method.currentData() or ""))
+        self.texture.setVisible(self.um.is_ai(self.method.currentData() or ""))
+
+    def preview_upscale(self) -> None:
+        """The chosen upscale tried on the first selected photo (its largest version), shown beside a plain
+        enlargement of it at the same size, at 100%."""
+        picked = self._picked()
+        if not picked:
+            self._say("Select a photo first — Preview tries the upscale on it.")
+            return
+        if getattr(self, "previewing", False):
+            return
+        self.previewing = True
+        photo = picked[0]
+        method, factor, texture = self.method.currentData(), int(self.factor.currentData()), float(self.texture.currentData())
+        self.preview_btn.setEnabled(False)
+        self._say(f"Trying {self.method.currentText().split(' (')[0]} on {depop.file_name(photo)}…"
+                  + (" (AI upscaling takes a little while)" if self.um.is_ai(method) else ""))
+        tmp = tempfile.mkdtemp(prefix="preview-", dir=self.tmp)
+
+        def work() -> None:
+            out = None
+            try:
+                got, why, _v = depop.fetch_best(photo, tmp, self._get)
+                if not got:
+                    out = ("", "", f"the photo couldn't be downloaded ({why})")
+                else:
+                    plain = os.path.join(tmp, "plain.png")
+                    from PIL import Image
+                    with Image.open(got) as im:
+                        im = im.convert("RGB")
+                        im.resize((im.width * factor, im.height * factor), Image.Resampling.BICUBIC).save(plain)
+                    work_copy = os.path.join(tmp, "upscaled" + os.path.splitext(got)[1])
+                    shutil.copyfile(got, work_copy)
+                    with self.heavy:
+                        ok = self.um.upscale_file(work_copy, method, factor, texture, self.engine)
+                    out = (plain, work_copy, "" if ok else "this photo is already large — it would be left as it is")
+            except Exception as e:  # noqa: BLE001 — a preview that fails is said, never a crash
+                out = ("", "", f"{type(e).__name__}: {e}")
+            self.bridge.call.emit(self._previewed, (out, photo, method, factor))
+        threading.Thread(target=work, daemon=True, name="depop-preview").start()
+
+    def _previewed(self, got) -> None:
+        (plain, upscaled, why), photo, method, factor = got
+        self.previewing = False
+        self._upscale_controls()
+        if self.closed:
+            return
+        if why and not plain:
+            self._say(f"Couldn't preview: {why}")
+            return
+        self._say("")
+        dlg = UpscalePreview(self, plain, upscaled, f"{factor}× — {self.um.label(method, self.engine)}", why)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
+
     def _log(self, line: str) -> None:
         self.log.appendPlainText(time.strftime("%H:%M:%S ") + line)
 
@@ -700,7 +804,10 @@ class DepopWindow(QMainWindow):
         self.unsaved: set[str] = set()
         self.present = 0
         self.total, self.settled = len(todo), 0
-        opts = social.Options(photos_2x=self.up_box.isChecked(), ai=self.engine is not None)
+        opts = social.Options(photos_2x=self.up_box.isChecked(), ai=self.engine is not None,
+                              method=self.method.currentData(), factor=int(self.factor.currentData()),
+                              texture=float(self.texture.currentData()))
+        self.up_label = f"{opts.factor}× ({self.method.currentText().split(' — ')[-1] if self.um.is_ai(opts.method) else self.method.currentText().split(' — ')[0]})"
         self.bar.setRange(0, self.total)
         self.bar.setValue(0)
         self.bar.show()
@@ -740,7 +847,7 @@ class DepopWindow(QMainWindow):
                 if photo.key in self.sold_keys:
                     self.sold_files.add(s.path)
                 self._log(f"{os.path.basename(s.path)} — {self.versions.get(photo.key, 'as shown')}"
-                          + (", upscaled 2×" if s.upscaled else ""))
+                          + (f", upscaled {self.up_label}" if s.upscaled else ""))
             item = self.tiles.get(photo.base)
             if item is not None:
                 item.setIcon(QIcon(self._tile(self.pix.get(photo.base), True)))
@@ -843,6 +950,52 @@ class DepopWindow(QMainWindow):
         self._close_exif()
         shutil.rmtree(self.tmp, ignore_errors=True)
         super().closeEvent(event)
+
+
+class UpscalePreview(QDialog):
+    """The same part of a photo, enlarged plainly (left) and as chosen (right), at 100% — dragged together."""
+
+    def __init__(self, parent, plain: str, upscaled: str, title: str, note: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Preview — {title}")
+        self.resize(1100, 680)
+        lay = QVBoxLayout(self)
+        head = QLabel(f"<b>{title}</b>  ·  left: a plain enlargement, right: this upscale — the same part of the photo "
+                      "at 100%. Drag either side to look around." + (f"<br>{note}" if note else ""))
+        head.setWordWrap(True)
+        lay.addWidget(head)
+        row = QHBoxLayout()
+        self.areas: list[QScrollArea] = []
+        for path, name in ((plain, "Plain"), (upscaled, "Upscaled")):
+            col = QVBoxLayout()
+            col.addWidget(QLabel(name))
+            area = QScrollArea()
+            area.setWidgetResizable(False)
+            label = QLabel()
+            pix = QPixmap(path)
+            label.setPixmap(pix)
+            label.resize(pix.size())
+            area.setWidget(label)
+            col.addWidget(area, 1)
+            row.addLayout(col, 1)
+            self.areas.append(area)
+        lay.addLayout(row, 1)
+        a, b = self.areas                              # scrolled together, so both show the same part
+        for bar in ("horizontalScrollBar", "verticalScrollBar"):
+            getattr(a, bar)().valueChanged.connect(getattr(b, bar)().setValue)
+            getattr(b, bar)().valueChanged.connect(getattr(a, bar)().setValue)
+        done = QPushButton("Done")
+        done.clicked.connect(self.accept)
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        bottom.addWidget(done)
+        lay.addLayout(bottom)
+        QTimer.singleShot(0, self._centre)
+
+    def _centre(self) -> None:
+        for area in self.areas:
+            for bar in (area.horizontalScrollBar(), area.verticalScrollBar()):
+                bar.setValue((bar.maximum() + bar.minimum()) // 2)
 
 
 def _pt(x: float, y: float):

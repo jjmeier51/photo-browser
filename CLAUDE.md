@@ -464,7 +464,9 @@ Python. (`SimpCityService`,
   `<folder>/Depop/<shop>/<slug>_<n>.jpg`, tagged "depop", record `.depop.json`. **Sold items too**: the page's own
   Sold tab is clicked (`depop.SOLD_TAB_JS` — Sold Items button, or Load Whole Shop with "Include sold items"); a
   listing is sold by its data, the tile's "Sold" badge, or being first met while that tab is open
-  (`Shop.sold_view`); SOLD band, Show For sale / Sold filter, tagged "sold". Never run against depop.com. §7.4g, §7.4g-2.
+  (`Shop.sold_view`); SOLD band, Show For sale / Sold filter, tagged "sold". **Upscaling is a choice**
+  (`mac/upscale_methods.py`: each AI model of the installed upscaler, or Clean / Sharp / Soft; 2–4×; texture kept;
+  Preview… side by side) — `social.Options.method/factor/texture`. Never run against depop.com. §7.4g, §7.4g-2, §7.4g-3.
 - **Receive from the Mac (AirDrop / Share sheet)** — the app opens `.pbgallery` archives (its own
   type, made by `mac/airdrop_to_iphone.py`; also offered by the pornpics browser, the star
   downloader's `--airdrop`, and Photo Browser for Mac's context menu) and, as an Alternate handler, **any
