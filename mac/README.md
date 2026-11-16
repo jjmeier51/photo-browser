@@ -1236,6 +1236,24 @@ Videos are put together and upscaled with AVFoundation — a small helper Photo 
 when that's installed instead (`brew install ffmpeg`). Neither: videos come in their one-file version, not
 upscaled (the log says so). The browser needs Qt WebEngine (part of PySide6, set up by `run.sh`).
 
+### Exclusive (subscriber-only) posts from Instagram and Facebook
+
+If you subscribe to a creator on Instagram or Facebook, their **Exclusive** posts, reels, stories and photos now come
+down with everything else when you run Download Instagram/Facebook Profile… — as long as the window's browser is
+logged in as the account that subscribes. They're tagged **exclusive** (as well as instagram / facebook), so the
+sidebar's Tags ▸ exclusive or a search for `tag:exclusive` finds them. Exclusive things you downloaded before get
+the tag too the next time a run comes across them. On Facebook the creator's Subscriber Hub is read at the end of
+the run; the log says if there isn't one (you may not be subscribed). Posts that are locked for your login — only
+a blurred preview — are left, and the log counts them.
+
+### To Delete
+
+Beside the ♡ in the viewer there's a bin: click it (or press **⇧⌘X**) to tag the photo or video **to-delete**. It
+turns red, and the item's tile gets a small red bin next to its heart. In the main window it's under Favorite in
+the right-click menu and in the Photos menu (⇧⌘X too), for everything selected; Undo (⌘Z) takes it back. Nothing is
+deleted — it's a tag, so you can go through them later (sidebar ▸ Tags ▸ to-delete) and delete them then. The
+iPhone app sees the tag too.
+
 ### Download photos from a Depop shop (`depop_downloader.py`, `depop.py`)
 
 Right-click a folder ▸ **Download ▸ Download from Depop…** (or the Download menu in the menu bar).

@@ -431,6 +431,14 @@ Python. (`SimpCityService`,
   chat-list `imageUrl`, `/@` links, `_thumbnail`) are never media, and the earlier version's avatar files are offered
   for the Trash. **Bought pay-per-view is delivered only as FairPlay/Widevine DRM (photos too): counted, never
   downloaded — DRM is never worked around** (also DRM playlists and `encv`/`pssh` MP4s). §7.4f.
+- **Exclusive content + To Delete (Mac, Nov 16)** — the Mac's Instagram and Facebook downloaders take subscriber-only
+  ("Exclusive") content the login subscribes to and tag it **"exclusive"** (`social.Item.exclusive`): Instagram posts
+  without a shortcode or flagged by their own keys, and the subscriber story reel; Facebook's **Subscriber Hub**
+  (the iPhone's `collectSubscriberHub`, ported: `facebook.hub_urls`). Detection (`social.is_exclusive` /
+  `is_locked` / `exclusive_in_text`) reads only the post's own keys, never a nested person's; a locked preview is
+  never downloaded; earlier downloads are tagged when met again (`("tag", paths, tags)`). Not run against the real
+  sites. **To Delete** (beside Favorite: viewer bin, right-click, Photos menu, ⇧⌘X) = the **"to-delete" tag**
+  (`TO_DELETE_TAG`, `Pane.set_to_delete`, undoable; red bin mark on tiles) — nothing is deleted by it. §7.4h.
 - **Depop shops in Photo Browser for Mac** (Mac only) — right-click a folder ▸ Download ▸ Download from Depop…
   (`mac/depop_downloader.py`, `mac/depop.py`): the shop's page in a browser, every listing photo as a tile to select
   (double-click = the listing), **Download** takes each at its largest — `depop.fetch_best` fetches `P0` and

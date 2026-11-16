@@ -3434,6 +3434,52 @@ reported ("will come next time") rather than read by scrolling the profile page,
 against a stand-in of that log (lookups 429, a search 400 to direct asks, the page's feed asks told to log in): no
 switch, every feed direct, all 10 files; with the number already in the record, the lookup stops after its throttled call and goes straight to the feeds.
 
+### 7.4h Exclusive (subscriber-only) content in the Mac's Instagram and Facebook downloaders (Nov 16, 2026)
+
+"Ensure the Facebook and Instagram downloaders are able to download 'Exclusive' posts/content that the user is
+subscribed to. Tag that content with 'exclusive'." Both sites deliver subscriber-only content to a logged-in
+subscriber like any other — the work is finding it, knowing it's exclusive, and never taking a locked preview.
+
+- **Instagram** (`instagram.exclusive`): a post or reel from the API feeds that has **no shortcode** (Instagram
+  gives Exclusive posts none — the iPhone app found that, which is why a key falls back to the pk), or whose own
+  keys say "subscribers" (`social.is_exclusive`); every item of a creator's subscriber-only **story reel** (the
+  tray's other reel for the same user, `subscriber_reels` — already downloaded, now marked).
+- **Facebook**: the iPhone's `collectSubscriberHub`, ported — the creator's **Subscriber Hub** at the addresses
+  the iPhone tries (`facebook.hub_urls`; a candidate that redirects to the login page is skipped and the login-wall
+  flag reset, so it doesn't end the run), every set on it walked whole, the photos and videos on its first page
+  read one by one; plus any photo whose own page labels it for subscribers (`social.exclusive_in_text`, within
+  6,000 characters of its id). Always on (the iPhone has a toggle, off by default): it costs at most four page
+  reads when there's no hub.
+- **Tagging**: `social.Item.exclusive` → the window adds "exclusive" beside "instagram"/"facebook"; a file
+  downloaded before (untagged) is tagged when a run meets it again — the run yields `("tag", paths, tags)`,
+  `SocialWindow._tag_existing`. The summary line counts both.
+- **Detection rules** (`social.py`, no single undocumented key trusted): a key on the post's *own* object (never a
+  nested person: `is_subscribed` / `fan_club_info` there describe the viewer or the creator and are true of
+  every post) whose name says subscribers-only / exclusive / fan-club content and whose value is true or names
+  subscribers; an audience/privacy key whose value is "subscribers"; viewer-state, button and count keys never
+  count. Close Friends ("besties") and paid partnerships (ads) are not exclusive. **Locked** (`is_locked`: a lock
+  flag, or "can the viewer see" false) → skipped and counted in the log, never downloaded as the post.
+
+Tested with scripted Instagram and Facebook answers (exclusive by missing shortcode, by key, by audience, a
+locked preview, viewer-only keys, a subscriber story reel, a hub with a set, photos and a video, a hub address that
+asks for a login, earlier downloads re-tagged). **Not run against the real sites** — the field names Meta uses are
+undocumented; if a subscribed creator's exclusive posts come down untagged, a troubleshooting dump of one would
+show the key to add.
+
+### Photo Browser for Mac: To Delete, beside Favorite (Nov 16, 2026)
+
+"Add a 'To Delete' button/tag next to the Favorite button. This then applies the 'to-delete' tag to the item."
+A **tag**, not a label: tags already reach the iPhone through the drive's shared tags, so nothing new is shared.
+Nothing is deleted by it — it marks things to go through later (sidebar ▸ Tags ▸ to-delete, or `tag:to-delete`).
+
+- **Viewer**: a bin between ♡ and ✦ (`MediaViewer.del_btn`, `toggle_to_delete`, ⇧⌘X); red and filled when the
+  item is marked; `Hooks.set_to_delete`.
+- **Main window**: right-click ▸ To Delete / Not To Delete under Favorite; Photos ▸ To Delete (⇧⌘X) in the menu
+  bar under Favorite; `Pane.set_to_delete(paths, on)` — undoable (toast Undo, ⌘Z). A selection that all has it
+  takes it off.
+- **Tiles**: a red disc with a white bin beside the heart (`marks_of`, `draw_labels`).
+- `TO_DELETE_TAG = "to-delete"` in both `photo_browser.py` and `media_viewer.py` (the viewer is imported lazily).
+
 ### 7.4g Depop shops in Photo Browser for Mac — `mac/depop.py`, `mac/depop_downloader.py` (Nov 16, 2026)
 
 "Add the ability to download photos from Depop stores. The user should be able to select one or more photos, and

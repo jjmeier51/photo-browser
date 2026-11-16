@@ -369,6 +369,9 @@ def install(win, sf) -> None:
         "Capture date, location, caption, keywords, camera and any other tag — of everything selected")
     fav = act(t, "Favorite", lambda: pane().toggle_label("favorite"), "Ctrl+Shift+F", lambda: bool(sel()),
               "Favorite the selection (or unfavorite it, when it all is) — the iPhone app's Favorites")
+    to_delete = act(t, "To Delete", lambda: pane().toggle_to_delete(), "Ctrl+Shift+X", lambda: bool(sel()),
+                    "Tag the selection “to-delete”, to go through later (or take it off, when it all has it) — "
+                    "nothing is deleted")
     to_ai = act(t, "To AI", lambda: pane().toggle_label("ai"), "Ctrl+Shift+A", lambda: bool(sel()),
                 "Mark the selection To AI (or take it off) — the iPhone app's To AI")
 
@@ -378,6 +381,7 @@ def install(win, sf) -> None:
         try:
             every = lambda label: bool(s) and all(label in store.labels(p, fresh=False) for p in s)   # noqa: E731
             fav.setText("Unfavorite" if every("favorite") else "Favorite")
+            to_delete.setText("Not To Delete" if sf.Pane._all_to_delete(s) else "To Delete")
             to_ai.setText("Remove To AI" if every("ai") else "To AI")
         except Exception:  # noqa: BLE001 — the titles are a nicety
             pass

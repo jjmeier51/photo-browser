@@ -116,6 +116,7 @@ class Hooks:
     labels_of: Callable[[str], list[str]] | None = None       # "favorite", "ai" — the iPhone app's labels
     remove_objects: Callable[[str], None] | None = None       # the photo → Remove Objects (remove_window.py)
     set_label: Callable[[str, str, bool], None] | None = None  # (path, label, on)
+    set_to_delete: Callable[[str, bool], None] | None = None   # (path, on): the "to-delete" tag (TO_DELETE_TAG)
     set_cover: Callable[[str, float | None], str] | None = None   # (path, a video's seconds) → what to say
     edit_photo: Callable[[str], None] | None = None           # the photo → the photo editor
     extra: dict = field(default_factory=dict)
@@ -402,6 +403,23 @@ def icon(name: str, color: str = "#F2F2F7", size: int = 18) -> QIcon:
         if name == "heart.fill":
             p.setBrush(c)
         p.drawPath(_heart(QRectF(s * 0.14, s * 0.2, s * 0.72, s * 0.64)))
+    elif name in ("bin", "bin.fill"):                         # To Delete: a bin with its lid
+        if name == "bin.fill":
+            p.setBrush(c)
+        body = QPainterPath()
+        body.moveTo(s * 0.27, s * 0.32)
+        body.lineTo(s * 0.33, s * 0.84)
+        body.lineTo(s * 0.67, s * 0.84)
+        body.lineTo(s * 0.73, s * 0.32)
+        body.closeSubpath()
+        p.drawPath(body)
+        p.drawLine(QPointF(s * 0.18, s * 0.26), QPointF(s * 0.82, s * 0.26))
+        p.drawLine(QPointF(s * 0.41, s * 0.26), QPointF(s * 0.44, s * 0.16))
+        p.drawLine(QPointF(s * 0.44, s * 0.16), QPointF(s * 0.56, s * 0.16))
+        p.drawLine(QPointF(s * 0.56, s * 0.16), QPointF(s * 0.59, s * 0.26))
+        if name == "bin":
+            for x in (0.43, 0.57):
+                p.drawLine(QPointF(s * x, s * 0.42), QPointF(s * x, s * 0.74))
     elif name == "sparkles":
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(c)
@@ -1387,6 +1405,8 @@ class _Chrome(QObject):
 
 
 FAVORITE_RED = "#FF375F"
+TO_DELETE_TAG = "to-delete"           # "To Delete": a tag, so it reaches the iPhone app through the drive's shared tags
+TO_DELETE_RED = "#FF453A"
 
 
 def available_geometry(widget: QWidget) -> QRect | None:
@@ -1531,10 +1551,14 @@ class MediaViewer(QWidget):
         h.addLayout(titles, 1)
         self.fav_btn = _bar_button("", "Favorite (⇧⌘F) — the iPhone app's Favorites", lambda: self.toggle_label("favorite"),
                                    "heart")
+        self.del_btn = _bar_button("", "To Delete (⇧⌘X) — tags it “to-delete”, to go through later",
+                                   self.toggle_to_delete, "bin")
         self.ai_btn = _bar_button("", "To AI (⇧⌘A) — the iPhone app's To AI", lambda: self.toggle_label("ai"), "sparkles")
         for b in (self.fav_btn, self.ai_btn):
             b.setCheckable(True)
             b.setVisible(self.hooks.labels_of is not None and self.hooks.set_label is not None)
+        self.del_btn.setCheckable(True)
+        self.del_btn.setVisible(self.hooks.tags_of is not None and self.hooks.set_to_delete is not None)
         self.frame_btn = _bar_button("", "Save Frame — this frame as a standard-range PNG in a “Screenshots” folder "
                                      "beside the video", self.save_frame, "camera")
         self.frames_btn = _bar_button("", "Export All Frames — every frame (or every other, every fourth) into a folder "
@@ -1544,7 +1568,7 @@ class MediaViewer(QWidget):
         self.more_btn = _bar_button("", "More", None, "more")
         self.more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.more_btn.setMenu(self._more_menu())
-        for b in (self.fav_btn, self.ai_btn, self.frame_btn, self.info_btn, self.more_btn):
+        for b in (self.fav_btn, self.del_btn, self.ai_btn, self.frame_btn, self.info_btn, self.more_btn):
             h.addWidget(b)
         self.frames_btn.setVisible(False)              # Export All Frames is in ⋯ (the bar stays narrow)
         h.addSpacing(6)
@@ -1709,7 +1733,7 @@ class MediaViewer(QWidget):
                            ("Ctrl+T", self.edit_tags), ("+", lambda: self.zoom(1.25)),
                            ("=", lambda: self.zoom(1.25)), ("-", lambda: self.zoom(0.8)),
                            ("0", self.fit_current), ("Ctrl+Shift+F", lambda: self.toggle_label("favorite")),
-                           ("Ctrl+Shift+A", lambda: self.toggle_label("ai"))):
+                           ("Ctrl+Shift+A", lambda: self.toggle_label("ai")), ("Ctrl+Shift+X", self.toggle_to_delete)):
             sc = QShortcut(QKeySequence(keys), self)
             sc.activated.connect(slot)
 
@@ -2027,6 +2051,7 @@ class MediaViewer(QWidget):
             self._zoom_label()
 
     def _show_labels(self) -> None:
+        self._show_to_delete()
         if self.hooks.labels_of is None:
             return
         have = self.hooks.labels_of(self.current) if self.paths else []
@@ -2037,6 +2062,27 @@ class MediaViewer(QWidget):
         self.ai_btn.setChecked(ai)
         self.ai_btn.setIcon(icon("sparkles", AI_PURPLE if ai else "#F2F2F7"))
         self.ai_btn.setToolTip("Remove To AI (⇧⌘A)" if ai else "To AI (⇧⌘A) — the iPhone app's To AI")
+
+    def _marked_to_delete(self) -> bool:
+        if self.hooks.tags_of is None or not self.paths:
+            return False
+        return any(t.casefold() == TO_DELETE_TAG for t in self.hooks.tags_of(self.current))
+
+    def _show_to_delete(self) -> None:
+        on = self._marked_to_delete()
+        self.del_btn.setChecked(on)
+        self.del_btn.setIcon(icon("bin.fill" if on else "bin", TO_DELETE_RED if on else "#F2F2F7"))
+        self.del_btn.setToolTip("Not To Delete (⇧⌘X) — takes the “to-delete” tag off" if on else
+                                "To Delete (⇧⌘X) — tags it “to-delete”, to go through later")
+
+    def toggle_to_delete(self) -> None:
+        """⇧⌘X / the bin beside ♡: the "to-delete" tag on (or off) — nothing is deleted."""
+        if self.hooks.set_to_delete is None or self.hooks.tags_of is None or not self.paths:
+            return
+        on = not self._marked_to_delete()
+        self.hooks.set_to_delete(self.current, on)
+        self._show_to_delete()
+        self.say("Marked To Delete — tagged “to-delete”." if on else "No longer To Delete.")
 
     def toggle_label(self, label: str) -> None:
         if self.hooks.labels_of is None or self.hooks.set_label is None or not self.paths:

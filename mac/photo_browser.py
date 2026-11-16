@@ -967,6 +967,18 @@ def labels_of(path: str) -> list[str]:
     return tag_store().labels(path, fresh=False)
 
 
+TO_DELETE_TAG = "to-delete"          # "To Delete" (beside Favorite) is this tag — nothing is deleted by it (= media_viewer's)
+TO_DELETE_RED = "#FF453A"
+
+
+def marks_of(path: str) -> list[str]:
+    """What a tile shows in its corner: the labels, and "to-delete" when the item carries that tag."""
+    out = list(labels_of(path))
+    if any(t.casefold() == TO_DELETE_TAG for t in tag_store().tags(path, fresh=False)):
+        out.append(TO_DELETE_TAG)
+    return out
+
+
 AI_PURPLE = "#AF52DE"
 
 
@@ -977,7 +989,7 @@ def draw_labels(p: QPainter, labels: list[str], rect: QRectF, corner: str = "top
         return
     d = max(13.0, min(20.0, rect.width() / 7))
     gap = 3.0
-    marks = [x for x in ("favorite", "ai") if x in labels]
+    marks = [x for x in ("favorite", TO_DELETE_TAG, "ai") if x in labels]
     total = len(marks) * d + (len(marks) - 1) * gap
     right = corner.endswith("right")
     x = rect.right() - 5 - total - nudge if right else rect.x() + 5 + nudge
@@ -991,6 +1003,12 @@ def draw_labels(p: QPainter, labels: list[str], rect: QRectF, corner: str = "top
         if mark == "favorite":
             p.setBrush(QColor("white"))
             p.drawPath(heart_path(box.adjusted(d * 0.22, d * 0.26, -d * 0.22, -d * 0.22)))
+        elif mark == TO_DELETE_TAG:                        # a red disc with a white bin
+            p.setBrush(QColor(TO_DELETE_RED))
+            p.drawEllipse(box)
+            p.setBrush(QColor("white"))
+            p.drawRect(QRectF(box.x() + d * 0.33, box.y() + d * 0.38, d * 0.34, d * 0.36))
+            p.drawRect(QRectF(box.x() + d * 0.26, box.y() + d * 0.27, d * 0.48, d * 0.08))
         else:
             p.setBrush(QColor(AI_PURPLE).lighter(150))
             p.drawPath(star_path(QPointF(box.center().x() - d * 0.05, box.center().y() + d * 0.05), d * 0.3))
@@ -1684,7 +1702,7 @@ class GridDelegate(QStyledItemDelegate):
         tags = tag_store().tags(path, fresh=False)
         if tags:
             self._draw_tags(p, tags, shown, option.font, not is_dir and kind_of(path) == "video" and thumb is not None)
-        draw_labels(p, labels_of(path), QRectF(shown), "top-right")
+        draw_labels(p, marks_of(path), QRectF(shown), "top-right")
         if not is_dir and self.pane.current_sort()[0] == "reactions":
             score = reaction_score(path)
             if score is not None:
@@ -2010,7 +2028,7 @@ class PhotoDelegate(QStyledItemDelegate):
                 tri.closeSubpath()
                 p.setBrush(QColor("white"))
                 p.drawPath(tri)
-        labels = labels_of(path)
+        labels = marks_of(path)
         if labels:                                     # bottom left, past a video's length (a folder's name: top)
             nudge = 0.0
             if kind == "video":
@@ -5635,6 +5653,7 @@ class Pane(QWidget):
             reveal=self._reveal_from_viewer, export_frames=lambda p: self.export_frames([p]),
             save_frame=frame_export.save_frame, labels_of=lambda p: tag_store().labels(p, fresh=False),
             set_label=lambda p, label, on: self.set_label([p], label, on), remove_objects=self.remove_objects,
+            set_to_delete=lambda p, on: self.set_to_delete([p], on, quiet=True),
             set_cover=self.cover_from_viewer, edit_photo=self.edit_photo,
             extra={"frame_note": frame_export.engine_note})
         # Opens over Photo Browser for Mac's window, as tall as its display, and takes each item's shape within that.
@@ -7314,6 +7333,9 @@ class Pane(QWidget):
         fav = bool(paths) and all("favorite" in labels_of(p) for p in paths)
         menu.addAction(glyph("heart" if fav else "heart.fill", THEME.secondary, 16), "Unfavorite" if fav else "Favorite",
                        lambda: self.set_label(paths, "favorite", not fav)).setShortcut(QKeySequence("Ctrl+Shift+F"))
+        marked = self._all_to_delete(paths)
+        menu.addAction(glyph("trash", THEME.secondary, 16), "Not To Delete" if marked else "To Delete",
+                       lambda: self.set_to_delete(paths, not marked)).setShortcut(QKeySequence("Ctrl+Shift+X"))
         ai = bool(paths) and all("ai" in labels_of(p) for p in paths)
         menu.addAction(glyph("sparkles", THEME.secondary, 16), "Remove To AI" if ai else "To AI",
                        lambda: self.set_label(paths, "ai", not ai)).setShortcut(QKeySequence("Ctrl+Shift+A"))
@@ -7351,6 +7373,51 @@ class Pane(QWidget):
             self.note(line, "Undo", lambda: win.undo_this(item))     # this toast's Undo takes *this* back
         else:
             self.note(line)
+
+    @staticmethod
+    def _all_to_delete(paths: list[str]) -> bool:
+        return bool(paths) and all(any(t.casefold() == TO_DELETE_TAG for t in tag_store().tags(p, fresh=False))
+                                   for p in paths)
+
+    def set_to_delete(self, paths: list[str], on: bool, quiet: bool = False) -> int:
+        """To Delete (beside Favorite; ⇧⌘X): the "to-delete" tag on the items, or off — so they can be gone through
+        later (sidebar ▸ Tags ▸ to-delete, or search tag:to-delete) and deleted then. Nothing is deleted here. The
+        tag reaches the iPhone app through the drive's shared tags. Undo puts back what was there."""
+        items = [p for p in paths if shared_tags.taggable(p)]
+        changing = [p for p in items if self._all_to_delete([p]) != on]
+        if not changing:
+            return 0
+        try:
+            n = tag_store().add(changing, [TO_DELETE_TAG]) if on else tag_store().remove(changing, [TO_DELETE_TAG])
+        except OSError as e:
+            QMessageBox.warning(self.window(), "To Delete", f"Couldn't save the tag: {e}")
+            return 0
+        tags_changed()
+        self.grid.viewport().update()
+        self.list.viewport().update()
+        what = f"{len(changing):,} item{'s' if len(changing) != 1 else ''}"
+        line = f"Marked {what} To Delete (tagged “{TO_DELETE_TAG}”)." if on else f"{what.capitalize()} no longer To Delete."
+
+        def undo() -> str:
+            if on:
+                tag_store().remove(changing, [TO_DELETE_TAG])
+            else:
+                tag_store().add(changing, [TO_DELETE_TAG])
+            tags_changed()
+            return f"{what.capitalize()} {'no longer' if on else 'marked'} To Delete again."
+        if quiet:                                       # (the viewer says it itself; ⌘Z still takes it back)
+            win = self.window()
+            if isinstance(win, MainWindow):
+                win.undo.push("To Delete" if on else "Not To Delete", undo)
+        else:
+            self._undoable("To Delete" if on else "Not To Delete", undo, line)
+        return n
+
+    def toggle_to_delete(self) -> None:
+        """⇧⌘X: To Delete for the selection — off when every selected item is already marked."""
+        paths = self.selected_paths()
+        if paths:
+            self.set_to_delete(paths, not self._all_to_delete(paths))
 
     def toggle_label(self, label: str) -> None:
         """⇧⌘F / ⇧⌘A: on for the selection — off when every selected item already has it."""
