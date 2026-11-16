@@ -36,9 +36,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, QUrl, Signal  # noqa: E402
+from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal  # noqa: E402
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap  # noqa: E402
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit,  # noqa: E402
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit,  # noqa: E402
                                QListView, QListWidget, QListWidgetItem, QMainWindow, QPlainTextEdit, QProgressBar,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript  # noqa: E402
@@ -106,6 +106,9 @@ class DepopWindow(QMainWindow):
         self.last_page = 0.0
         self.idle = 0
         self.last_height = 0
+        self.phase = "selling"                            # Load Whole Shop: the listings for sale, then "sold", then done
+        self.sold_url: str | None = None                  # the address the Sold tab was open at
+        self.sold_state: dict[str, bool] = {}             # photo base → drawn as sold
         self.by_browser = False
         self.exif = None
         self.dest = self.person
@@ -113,6 +116,8 @@ class DepopWindow(QMainWindow):
         self.upscaled: list[str] = []
         self.unsaved: set[str] = set()
         self._tagged: set[str] = set()
+        self.sold_files: set[str] = set()
+        self.sold_keys: set[str] = set()
         self.versions: dict[str, str] = {}
         self.tmp = tempfile.mkdtemp(prefix="photo-browser-depop-")
         self.thumbs = concurrent.futures.ThreadPoolExecutor(THUMB_LANES, thread_name_prefix="depop-thumb")
@@ -134,11 +139,15 @@ class DepopWindow(QMainWindow):
         self.scroll_btn = QPushButton("Load Whole Shop")
         self.scroll_btn.setToolTip("Scrolls the shop's page to its end, so every listing's photos are here to pick from")
         self.scroll_btn.clicked.connect(self.toggle_scroll)
+        self.sold_btn = QPushButton("Sold Items")
+        self.sold_btn.setToolTip("Opens the shop's Sold tab in the page, so the listings it has sold are read too")
+        self.sold_btn.clicked.connect(self.open_sold)
         top = QHBoxLayout()
         top.addWidget(QLabel("Shop"))
         top.addWidget(self.field, 1)
         top.addWidget(open_btn)
         top.addWidget(self.scroll_btn)
+        top.addWidget(self.sold_btn)
 
         self.grid = QListWidget()
         self.grid.setViewMode(QListView.ViewMode.IconMode)
@@ -162,10 +171,17 @@ class DepopWindow(QMainWindow):
         rl.addWidget(self.grid, 1)
         pick = QHBoxLayout()
         all_btn = QPushButton("Select All")
-        all_btn.clicked.connect(self.grid.selectAll)
+        all_btn.clicked.connect(self.select_shown)
         none_btn = QPushButton("Select None")
         none_btn.clicked.connect(self.grid.clearSelection)
         self.counted = QLabel("")
+        self.show_box = QComboBox()
+        for key, text in (("all", "Everything"), ("selling", "For sale"), ("sold", "Sold")):
+            self.show_box.addItem(text, key)
+        self.show_box.setToolTip("Which listings' photos are shown — Select All takes only what's shown")
+        self.show_box.currentIndexChanged.connect(lambda _i: self._filter())
+        pick.addWidget(QLabel("Show:"))
+        pick.addWidget(self.show_box)
         pick.addWidget(all_btn)
         pick.addWidget(none_btn)
         pick.addWidget(self.counted, 1)
@@ -183,6 +199,12 @@ class DepopWindow(QMainWindow):
                                 "for the rest, one every couple of seconds.")
         self.all_box.setChecked(str(self.settings.value("depop/all_photos", "true")) == "true")
         self.all_box.toggled.connect(lambda on: self.settings.setValue("depop/all_photos", "true" if on else "false"))
+        self.sold_box = QCheckBox("Include sold items")
+        self.sold_box.setToolTip("Load Whole Shop goes on into the shop's Sold tab once the listings for sale are in, so "
+                                 "sold listings' photos are here to pick from too (shown with a SOLD band; downloaded "
+                                 "ones are tagged “sold” as well as “depop”)")
+        self.sold_box.setChecked(str(self.settings.value("depop/sold", "true")) == "true")
+        self.sold_box.toggled.connect(lambda on: self.settings.setValue("depop/sold", "true" if on else "false"))
         self.up_box = QCheckBox("Upscale every photo 2×")
         self.up_box.setChecked(str(self.settings.value("depop/upscale", "false")) == "true")
         self.up_box.toggled.connect(lambda on: self.settings.setValue("depop/upscale", "true" if on else "false"))
@@ -200,6 +222,8 @@ class DepopWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         opts = QHBoxLayout()
         opts.addWidget(self.all_box)
+        opts.addSpacing(18)
+        opts.addWidget(self.sold_box)
         opts.addSpacing(18)
         opts.addWidget(self.up_box)
         opts.addStretch(1)
@@ -285,6 +309,8 @@ class DepopWindow(QMainWindow):
             return
         self.scrolling = False
         self.scroll_btn.setText("Load Whole Shop")
+        self.phase = "selling"
+        self.sold_state = {}
         self.shop = depop.Shop(shop)
         self.asked.clear()
         self.tiles.clear()
@@ -302,9 +328,36 @@ class DepopWindow(QMainWindow):
         self._say(f"Reading {shop}'s shop…")
         self._count()
 
+    def open_sold(self) -> None:
+        """The shop's Sold tab, opened in the page (its own tab clicked); what it loads is read as sold."""
+        if not self._on_site():
+            return
+
+        def done(raw) -> None:
+            try:
+                found = bool(json.loads(raw).get("found")) if isinstance(raw, str) else False
+            except ValueError:
+                found = False
+            if found:
+                self.shop.sold_view, self.sold_url = True, None
+                self.last_height = 0
+                self.idle = 0
+                self._log("Opened the shop's Sold tab — its listings are read as sold.")
+                self._say("Reading the shop's sold items…" + (" scrolling to the end…" if self.scrolling else
+                          " (Load Whole Shop scrolls to the end.)"))
+            else:
+                self._say("This page has no Sold tab to open — open the shop's own page (or its Sold items) in the page "
+                          "on the left; what it shows is read.")
+                if self.phase == "sold" and self.scrolling:
+                    self.phase = "done"
+                    self.toggle_scroll()
+        self.view.page().runJavaScript(depop.SOLD_TAB_JS, 0, done)
+
     def toggle_scroll(self) -> None:
         self.scrolling = not self.scrolling
         self.idle = 0
+        if self.scrolling:
+            self.phase = "sold" if self.shop.sold_view else "selling"
         self.scroll_btn.setText("Stop Scrolling" if self.scrolling else "Load Whole Shop")
         if self.scrolling:
             self._say("Scrolling the shop to its end…")
@@ -352,6 +405,18 @@ class DepopWindow(QMainWindow):
             self._say("Depop is checking the browser — answer its check in the page on the left; reading goes on by "
                       "itself after.")
             return
+        # Is the Sold tab what's open? The page says so when its tab is marked (or the address says "sold"); a tab
+        # this window clicked counts as open until the page goes somewhere else.
+        url = str(state.get("url") or "")
+        if state.get("sold_open"):
+            if not self.shop.sold_view:
+                self._log("The shop's Sold tab is open — its listings are read as sold.")
+            self.shop.sold_view, self.sold_url = True, url
+        elif self.shop.sold_view:
+            if self.sold_url is None:
+                self.sold_url = url
+            elif url != self.sold_url:
+                self.shop.sold_view, self.sold_url = False, None     # left it
         if self.shop.shop:
             try:
                 got += self.shop.read_shown(state.get("shown") or [])
@@ -365,8 +430,17 @@ class DepopWindow(QMainWindow):
             self.last_height = height
             waiting = self.all_box.isChecked() and any(s not in self.asked for s in self.shop.incomplete())
             if self.idle >= IDLE_TICKS and not waiting:
+                selling, sold = self.shop.counts()
+                if self.phase == "selling" and self.sold_box.isChecked() and not self.shop.sold_view:
+                    self._log(f"The end of the listings for sale ({selling:,}) — on to the sold items.")
+                    self.phase = "sold"
+                    self.idle = 0
+                    self.open_sold()
+                    return
+                self.phase = "done"
                 self.toggle_scroll()
-                self._log(f"The end of the shop: {len(self.shop.listings):,} listing(s), {len(self.shop.photos):,} photo(s).")
+                self._log(f"The end of the shop: {selling:,} listing(s) for sale, {sold:,} sold, "
+                          f"{len(self.shop.photos):,} photo(s).")
             else:
                 self.view.page().runJavaScript(fanfix.SCROLL_JS, 0, lambda _r: None)
         if not self.running:
@@ -381,8 +455,12 @@ class DepopWindow(QMainWindow):
                       "answer it there.")
             return
         left = [s for s in self.shop.incomplete() if s not in self.asked] if self.all_box.isChecked() else []
-        self._say(f"{m:,} photo(s) of {n:,} listing(s) found" + (" — scrolling for more…" if self.scrolling else
-                  " so far — scroll the shop (or Load Whole Shop) for more." if not left else "")
+        selling, sold = self.shop.counts()
+        of = f"{selling:,} listing(s) for sale" + (f" and {sold:,} sold" if sold else "")
+        self._say(f"{m:,} photo(s) of {of} found" + (" (the Sold tab)" if self.shop.sold_view else "")
+                  + (" — scrolling for more…" if self.scrolling else
+                  (" — the whole shop." if self.phase == "done" else
+                   " so far — scroll the shop (or Load Whole Shop) for more.") if not left else "")
                   + (f" Reading the other photos of {len(left):,} listing(s)…" if left else ""))
 
     def _ask_for_a_page(self) -> None:
@@ -397,8 +475,20 @@ class DepopWindow(QMainWindow):
         self.view.page().runJavaScript(depop.page_fetch_js(slug), 0, lambda _r: None)
 
     # ------------------------------------------------------------------ the grid
+    def _sold(self, p: depop.Photo) -> bool:
+        it = self.shop.listings.get(p.slug)
+        return bool(it and it.sold)
+
     def _sync_grid(self) -> None:
-        """A tile for each photo not shown yet — beside its listing's others."""
+        """A tile for each photo not shown yet — beside its listing's others; a tile whose listing turned out to be
+        sold gets its band."""
+        for base, item in self.tiles.items():
+            p = self.shop.photos.get(base)
+            if p is not None and self._sold(p) != self.sold_state.get(base):
+                self.sold_state[base] = self._sold(p)
+                item.setIcon(QIcon(self._tile(self.pix.get(base), p.key in self.have, self.sold_state[base])))
+                self._tip(p)
+                self._show_or_hide(item, p)
         new = [p for p in self.shop.ordered() if p.base not in self.tiles]
         if not new:
             return
@@ -406,7 +496,8 @@ class DepopWindow(QMainWindow):
             item = QListWidgetItem()
             item.setData(BASE, p.base)
             item.setSizeHint(QSize(TILE + 10, TILE + 10))
-            item.setIcon(QIcon(self._tile(None, p.key in self.have)))
+            self.sold_state[p.base] = self._sold(p)
+            item.setIcon(QIcon(self._tile(None, p.key in self.have, self.sold_state[p.base])))
             row = self.grid.count()
             it = self.shop.listings.get(p.slug)
             if it is not None:                             # after the listing's photo before it, when that's shown
@@ -415,6 +506,7 @@ class DepopWindow(QMainWindow):
                     row = self.grid.row(self.tiles[before[-1]]) + 1
             self.grid.insertItem(row, item)
             self.tiles[p.base] = item
+            self._show_or_hide(item, p)
             self._tip(p)
             self.thumbs.submit(self._thumb, p.base, p.thumb())
         self.empty.setVisible(False)
@@ -430,7 +522,28 @@ class DepopWindow(QMainWindow):
         item.setToolTip(words[:160] + many + ("\nSold" if it and it.sold else "")
                         + ("\nAlready downloaded" if p.key in self.have else ""))
 
-    def _tile(self, pix: QPixmap | None, have: bool) -> QPixmap:
+    def _show_or_hide(self, item: QListWidgetItem, p: depop.Photo) -> None:
+        want = self.show_box.currentData()
+        item.setHidden(want == "sold" and not self._sold(p) or want == "selling" and self._sold(p))
+
+    def _filter(self) -> None:
+        for base, item in self.tiles.items():
+            p = self.shop.photos.get(base)
+            if p is not None:
+                self._show_or_hide(item, p)
+                if item.isHidden():
+                    item.setSelected(False)
+        self._count()
+
+    def select_shown(self) -> None:
+        self.grid.blockSignals(True)
+        for item in self.tiles.values():
+            if not item.isHidden():
+                item.setSelected(True)
+        self.grid.blockSignals(False)
+        self._count()
+
+    def _tile(self, pix: QPixmap | None, have: bool, sold: bool = False) -> QPixmap:
         out = QPixmap(TILE, TILE)
         out.fill(QColor(128, 128, 128, 40))
         p = QPainter(out)
@@ -441,6 +554,16 @@ class DepopWindow(QMainWindow):
             p.setOpacity(0.45 if have else 1.0)
             p.drawPixmap((TILE - scaled.width()) // 2, (TILE - scaled.height()) // 2, scaled)
             p.setOpacity(1.0)
+        if sold:                                           # Depop's own mark: a band across the top
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 214, 10))
+            p.drawRect(0, 0, TILE, 22)
+            p.setPen(QColor(0, 0, 0))
+            f = p.font()
+            f.setBold(True)
+            f.setPointSizeF(max(8.0, f.pointSizeF() - 1))
+            p.setFont(f)
+            p.drawText(QRectF(0, 0, TILE, 22), Qt.AlignmentFlag.AlignCenter, "SOLD")
         if have:                                           # already in the folder: a tick
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(48, 209, 88))
@@ -476,13 +599,13 @@ class DepopWindow(QMainWindow):
         if item is None or self.closed:
             return
         self.pix[base] = QPixmap(path)
-        item.setIcon(QIcon(self._tile(self.pix[base], depop.photo_id(base) in self.have)))
+        item.setIcon(QIcon(self._tile(self.pix[base], depop.photo_id(base) in self.have, self.sold_state.get(base, False))))
 
     def _select_listing(self, item: QListWidgetItem) -> None:
         p = self.shop.photos.get(item.data(BASE))
         it = self.shop.listings.get(p.slug) if p else None
         for base in (it.photos if it else []):
-            if base in self.tiles:
+            if base in self.tiles and not self.tiles[base].isHidden():
                 self.tiles[base].setSelected(True)
 
     def _picked(self) -> list[depop.Photo]:
@@ -571,6 +694,8 @@ class DepopWindow(QMainWindow):
         self.versions: dict[str, str] = {}
         self.written: list[str] = []
         self.upscaled: list[str] = []
+        self.sold_files: set[str] = set()
+        self.sold_keys = {p.key for p in todo if self._sold(p)}
         self.failed: list[tuple[str, str]] = []
         self.unsaved: set[str] = set()
         self.present = 0
@@ -612,6 +737,8 @@ class DepopWindow(QMainWindow):
                 self.written.append(s.path)
                 if s.upscaled:
                     self.upscaled.append(s.path)
+                if photo.key in self.sold_keys:
+                    self.sold_files.add(s.path)
                 self._log(f"{os.path.basename(s.path)} — {self.versions.get(photo.key, 'as shown')}"
                           + (", upscaled 2×" if s.upscaled else ""))
             item = self.tiles.get(photo.base)
@@ -647,6 +774,9 @@ class DepopWindow(QMainWindow):
                     up = [p for p in fresh if p in self.upscaled]
                     if up:
                         self.tags.add(up, [social.UPSCALED_TAG])
+                    sold = [p for p in fresh if p in self.sold_files]
+                    if sold:
+                        self.tags.add(sold, [depop.SOLD_TAG])
                 self._tagged.update(fresh)
             except OSError as e:
                 self._log(f"Couldn't save the tags: {e.strerror or e}")

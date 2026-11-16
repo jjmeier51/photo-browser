@@ -461,7 +461,10 @@ Python. (`SimpCityService`,
   keeps what the page loads and `depop.Shop` looks for anything shaped like a listing (a `slug` + pictures) — don't
   hard-code Depop's API addresses; a listing's other photos come from its own page, fetched by the page, one every
   1.6 s. Other sellers' listings (slug doesn't start with the shop) and `U<n>` avatars are left out. Into
-  `<folder>/Depop/<shop>/<slug>_<n>.jpg`, tagged "depop", record `.depop.json`. Never run against depop.com. §7.4g.
+  `<folder>/Depop/<shop>/<slug>_<n>.jpg`, tagged "depop", record `.depop.json`. **Sold items too**: the page's own
+  Sold tab is clicked (`depop.SOLD_TAB_JS` — Sold Items button, or Load Whole Shop with "Include sold items"); a
+  listing is sold by its data, the tile's "Sold" badge, or being first met while that tab is open
+  (`Shop.sold_view`); SOLD band, Show For sale / Sold filter, tagged "sold". Never run against depop.com. §7.4g, §7.4g-2.
 - **Receive from the Mac (AirDrop / Share sheet)** — the app opens `.pbgallery` archives (its own
   type, made by `mac/airdrop_to_iphone.py`; also offered by the pornpics browser, the star
   downloader's `--airdrop`, and Photo Browser for Mac's context menu) and, as an Alternate handler, **any

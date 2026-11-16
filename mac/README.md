@@ -1291,6 +1291,11 @@ Right-click a folder ▸ **Download ▸ Download from Depop…** (or the Downloa
    installed — the one AI Upscale 2× uses — otherwise a plain enlargement).
 5. Press **Download N Photos**.
 
+**Sold items**: with **Include sold items** ticked (it is to begin with), Load Whole Shop goes on into the shop's
+Sold tab once the listings for sale are in — or press **Sold Items** to open that tab yourself. Sold listings' photos
+get a yellow SOLD band, **Show:** picks Everything / For sale / Sold, and the ones you download are tagged **sold**
+as well as depop.
+
 Each photo comes down in the largest version the shop has of it — the window checks rather than assumes, and the
 log says which it took — as `<listing>_<n>.jpg` in `<your folder>/Depop/<shop>`, with the listing's description
 and date in the file and the "depop" tag ("upscaled" too, when it was). Photos already downloaded show a green

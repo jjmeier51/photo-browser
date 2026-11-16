@@ -3504,6 +3504,30 @@ Tested on Linux: the store (backup fallback, nearest birthday, ages around the d
 off-drive folders), the window offscreen, and the iPhone's merge simulated step for step in Python against the
 Mac's store on one drive (old birthdays out, Mac change and removal in, phone change out, no needless rewrite).
 
+#### 7.4g-2 Depop: sold items too (Nov 16, 2026)
+
+"Update the Depop downloader to also be able to find sold items within a user's shop." Depop publishes no address
+for a shop's sold items (its help pages only describe the shop's **Sold** tab), so nothing is guessed:
+
+- **The page's own Sold tab is clicked** (`depop.SOLD_TAB_JS`: an `a` / `button` / `[role=tab]` reading "Sold",
+  "Sold items" or "Sold (123)") — by **Sold Items** (top of the window), or by **Load Whole Shop** when **Include
+  sold items** is ticked (default; remembered): it reads the listings for sale to the end, then opens the Sold tab
+  and reads that to the end too (`phase`: selling → sold → done). No Sold tab on the page: said, and left to the
+  person to open in the page.
+- **Which listings are sold**: their data says so (`status` SOLD/sold_out, `sold` / `isSold` / `is_sold`, a
+  `sold_at`-style date); or the tile wears Depop's "Sold" badge (`DOM_JS` → `sold`); or the listing was **first
+  met while the Sold tab was open** (`Shop.sold_view` — the sold list needn't carry a status). The tab counts as open
+  while the page marks it (`aria-selected` / `aria-current` / an active class / "sold" in the address), or after
+  this window clicked it until the page goes elsewhere (`sold_url`). Listings already known stay as they were.
+- **The grid**: a yellow **SOLD** band on sold listings' tiles; **Show: Everything / For sale / Sold**; Select All
+  and double-click (whole listing) take only what's shown. The status line counts both ("12 for sale and 9 sold").
+- **Downloads**: the same largest-version rule and names; sold listings' photos are tagged **"sold"** as well as
+  "depop" (`depop.SOLD_TAG`). A sold listing's own page is read for its other photos the same way.
+
+Tested against the stand-in shop with a Sold tab whose first page of listings has no status at all (taken as sold
+because the tab was open), later pages saying SOLD, "Sold" badges on tiles, and two listings for sale whose data
+already says SOLD; the earlier test (sold items off) still passes. **Not run against depop.com.**
+
 ### 7.4h Exclusive (subscriber-only) content in the Mac's Instagram and Facebook downloaders (Nov 16, 2026)
 
 "Ensure the Facebook and Instagram downloaders are able to download 'Exclusive' posts/content that the user is

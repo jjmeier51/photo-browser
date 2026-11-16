@@ -45,6 +45,7 @@ import fanfix
 import social
 
 TAG = "depop"
+SOLD_TAG = "sold"                            # a sold listing's photos get this too
 KEYWORD = "Depop"
 RECORD = ".depop.json"
 FORMAT = "photobrowser-depop"
@@ -69,6 +70,7 @@ _NOT_SHOPS = {"products", "product", "search", "explore", "category", "brands", 
               "sitemap", "api", "static", "_next", "favicon.ico", "robots.txt", "news", "careers", "press", "pay"}
 _PICTURE_KEYS = ("pictures", "pictures_data", "picturesData", "images", "photos", "preview", "previews", "image", "picture")
 _TEXT_KEYS = ("description", "title", "name")
+_SOLD_KEYS = ("sold_at", "soldAt", "date_sold", "dateSold", "sold_date", "soldDate", "sold_time", "soldTime")
 _DATE_KEYS = ("date_updated", "dateUpdated", "date_created", "dateCreated", "created_date", "createdDate",
               "pub_date", "published_at", "publishedAt", "listed_at", "created_at", "createdAt")
 
@@ -190,6 +192,9 @@ class Shop:
         self.photos: dict[str, Photo] = {}                # by base
         self.loose: list[str] = []                        # photo bases seen with no listing named
         self.others = 0                                   # listings left out as someone else's
+        # The shop's Sold tab is open: a listing first met now is a sold one, whatever its data says (the sold list
+        # doesn't always carry a status). Set by the window from what the page shows (`DOM_JS` → `sold_tab`).
+        self.sold_view = False
 
     # -- the page's data
     def read_text(self, text: str) -> int:
@@ -236,7 +241,7 @@ class Shop:
         if not self._ours(slug):
             self.others += 1
             return True
-        it = self.listings.setdefault(slug, Listing(slug))
+        it = self._listing_for(slug)
         if not it.title:
             for key in _TEXT_KEYS:
                 if isinstance(d.get(key), str) and d[key].strip():
@@ -244,11 +249,25 @@ class Shop:
                     break
         if not it.date:
             it.date = next((t for t in (_when(d.get(k)) for k in _DATE_KEYS) if t), 0)
-        status = str(d.get("status") or d.get("state") or "").lower()
-        if d.get("sold") is True or d.get("isSold") is True or status in ("sold", "s", "purchased"):
+        status = str(d.get("status") or d.get("state") or d.get("listing_status") or d.get("listingStatus") or "").lower()
+        if d.get("sold") is True or d.get("isSold") is True or d.get("is_sold") is True \
+                or status in ("sold", "s", "purchased", "sold_out", "soldout") \
+                or any(d.get(k) for k in _SOLD_KEYS):
             it.sold = True
         self._add(it, found, whole)
         return True
+
+    def _listing_for(self, slug: str) -> "Listing":
+        """The listing of that slug — made now when it's new, and then sold if the Sold tab is what's open."""
+        it = self.listings.get(slug)
+        if it is None:
+            it = self.listings[slug] = Listing(slug, sold=self.sold_view)
+        return it
+
+    def counts(self) -> tuple[int, int]:
+        """(listings for sale, listings sold)."""
+        sold = sum(1 for it in self.listings.values() if it.sold)
+        return len(self.listings) - sold, sold
 
     def _ours(self, slug: str) -> bool:
         return not self.shop or slug.startswith(self.shop.lower() + "-") or slug == self.shop.lower()
@@ -315,9 +334,11 @@ class Shop:
                 continue
             slug = slug_of(str(s.get("href") or ""))
             if slug and self._ours(slug):
-                it = self.listings.setdefault(slug, Listing(slug))
+                it = self._listing_for(slug)
                 if not it.title and isinstance(s.get("alt"), str):
                     it.title = " ".join(s["alt"].split())[:300]
+                if s.get("sold") is True:                   # the tile wears Depop's "Sold" badge
+                    it.sold = True
                 self._add(it, found, False)
             elif not slug:
                 for base, n, ext, width in found:
@@ -422,10 +443,48 @@ DOM_JS = r"""
     var key = src + '|' + (a ? a.getAttribute('href') : '');
     if (seen[key]) continue;
     seen[key] = 1;
-    out.push({src: src, all: all, href: a ? a.href : '', alt: el.alt || ''});
+    // a "Sold" badge on the tile (Depop lays one over a sold listing's photo) — its own text, not the title's
+    var sold = false;
+    if (a) {
+      var marks = a.querySelectorAll('*');
+      for (var j = 0; j < marks.length && !sold; j++) {
+        var m = marks[j];
+        if (m.children.length === 0 && /^\s*sold\s*$/i.test(m.textContent || '')) sold = true;
+      }
+      if (!sold && /sold/i.test(a.getAttribute('aria-label') || '')) sold = true;
+    }
+    out.push({src: src, all: all, href: a ? a.href : '', alt: el.alt || '', sold: sold});
   }
+  // the shop's Sold tab: there, and is it the one open?
+  var tab = null, tabs = document.querySelectorAll('a, button, [role="tab"]');
+  for (var k = 0; k < tabs.length; k++) {
+    var t = (tabs[k].innerText || tabs[k].textContent || '').replace(/\s+/g, ' ').trim();
+    if (/^sold( items)?( \(?[\d.,]+k?\)?)?$/i.test(t)) { tab = tabs[k]; break; }
+  }
+  var open = !!tab && (tab.getAttribute('aria-selected') === 'true' || tab.getAttribute('aria-current') === 'page' ||
+                       /(^|[\s_-])(active|selected|current)([\s_-]|$)/i.test(tab.className || '') ||
+                       /[\/?&#=]sold([\/?&#]|$)/i.test(location.href));
   return JSON.stringify({shown: out, url: location.href, title: document.title, hooked: !!window.__pbHooked,
-                         height: (document.scrollingElement || document.documentElement).scrollHeight});
+                         height: (document.scrollingElement || document.documentElement).scrollHeight,
+                         sold_tab: !!tab, sold_open: open});
+})()
+"""
+
+
+# Opens the shop's Sold tab the way the person would: the page's own "Sold" / "Sold items" tab, link or button,
+# clicked — nothing is guessed about Depop's addresses. Returns whether there was one.
+SOLD_TAB_JS = r"""
+(function () {
+  var tabs = document.querySelectorAll('a, button, [role="tab"]');
+  for (var k = 0; k < tabs.length; k++) {
+    var t = (tabs[k].innerText || tabs[k].textContent || '').replace(/\s+/g, ' ').trim();
+    if (/^sold( items)?( \(?[\d.,]+k?\)?)?$/i.test(t)) {
+      tabs[k].scrollIntoView({block: 'center'});
+      tabs[k].click();
+      return JSON.stringify({found: true, text: t});
+    }
+  }
+  return JSON.stringify({found: false});
 })()
 """
 
@@ -537,6 +596,7 @@ def shop_of_folder(folder: str | Path) -> str:
 
 
 def item_for(photo: Photo, listing: Listing | None, folder: Path, shop: str) -> social.Item:
+    """The download for one photo (a sold listing's photos are also tagged `SOLD_TAG`, by the window)."""
     return social.Item(key=photo.key, folder=folder, name=file_name(photo), video=False, url=photo.url(0),
                        ext="jpg" if photo.ext in ("jpg", "jpeg") else photo.ext,
                        date=listing.date if listing else 0, caption=listing.title if listing else "",
