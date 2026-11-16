@@ -367,6 +367,15 @@ def install(win, sf) -> None:
     act(t, "Edit Metadata…", lambda: pane().edit_metadata(editable()) if editable() else None, "Ctrl+I",
         lambda: bool(editable()),
         "Capture date, location, caption, keywords, camera and any other tag — of everything selected")
+    dated = lambda: sel() or ([pane().location] if os.path.isdir(pane().location or "") else [])   # noqa: E731
+    act(t, "Set Dates from File Names…", lambda: pane().dates_from_names(dated()) if dated() else None, None,
+        lambda: bool(dated()),
+        "Each photo and video gets the date in its name (name_2026_11_16_… and the usual camera names) as its own "
+        "date — the selection, or everything in the folder shown")
+    act(t, "Restore Capture Dates…", lambda: pane().dates_from_names(dated(), restore=True) if dated() else None,
+        None, lambda: bool(dated()),
+        "The iPhone app's: each file's date back from its name, else from the date inside it — for files a copy "
+        "or an import stamped with “now”")
     fav = act(t, "Favorite", lambda: pane().toggle_label("favorite"), "Ctrl+Shift+F", lambda: bool(sel()),
               "Favorite the selection (or unfavorite it, when it all is) — the iPhone app's Favorites")
     to_delete = act(t, "To Delete", lambda: pane().toggle_to_delete(), "Ctrl+Shift+X", lambda: bool(sel()),

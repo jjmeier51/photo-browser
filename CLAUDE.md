@@ -439,6 +439,13 @@ Python. (`SimpCityService`,
   never downloaded; earlier downloads are tagged when met again (`("tag", paths, tags)`). Not run against the real
   sites. **To Delete** (beside Favorite: viewer bin, right-click, Photos menu, ⇧⌘X) = the **"to-delete" tag**
   (`TO_DELETE_TAG`, `Pane.set_to_delete`, undoable; red bin mark on tiles) — nothing is deleted by it. §7.4h.
+- **Set Dates from File Names / Restore Capture Dates (Mac, Nov 16)** — right-click ▸ Dates ▸ … / Photos menu
+  (`mac/name_dates.py`, `mac/name_dates_window.py`): the date in a name (`name_2026_11_16_<id>`, camera names,
+  `metadata_edit.date_from_name`; no time = noon) becomes the file's created + modified date (`clone_drive.set_dates`)
+  and, optionally, its capture date inside (ExifTool); Restore = the iPhone's `restoreCaptureDates` (name, else
+  the date inside). Undoable (file dates). The iPhone's `dateFromFilename` keeps a date followed by an id now.
+  **`simpcity.ExifSession` numbers each command** (`-execute<N>`): with `-q`, a bare `-execute` gets no
+  `{ready}` and every call waited out its timeout. §6ao.
 - **Depop shops in Photo Browser for Mac** (Mac only) — right-click a folder ▸ Download ▸ Download from Depop…
   (`mac/depop_downloader.py`, `mac/depop.py`): the shop's page in a browser, every listing photo as a tile to select
   (double-click = the listing), **Download** takes each at its largest — `depop.fetch_best` fetches `P0` and

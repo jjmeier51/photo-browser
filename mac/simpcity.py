@@ -1340,11 +1340,15 @@ class ExifSession:
             self.buf = b""
         if self.proc.stdin is None or self.proc.stdout is None:
             raise OSError("no pipes")
-        self.proc.stdin.write(("\n".join([*args, "-execute"]) + "\n").encode("utf-8"))
+        # A numbered -execute: ExifTool always answers "{readyN}" to one — to a bare -execute it says nothing at all
+        # when -q is among the arguments (Edit Metadata's reads), and every call waited out its whole timeout.
+        self.calls = getattr(self, "calls", 0) + 1
+        self.proc.stdin.write(("\n".join([*args, f"-execute{self.calls}"]) + "\n").encode("utf-8"))
         self.proc.stdin.flush()
         fd = self.proc.stdout.fileno()
         deadline = time.monotonic() + timeout
-        while not (m := _READY.search(self.buf)):
+        mine = re.compile(rb"\{ready" + str(self.calls).encode() + rb"\}\r?\n")   # this call's own answer:
+        while not (m := mine.search(self.buf)):                     # an earlier one cut off by a timeout isn't it
             left = deadline - time.monotonic()
             if left <= 0:
                 raise TimeoutError("no answer")
@@ -1355,6 +1359,9 @@ class ExifSession:
                     raise EOFError("ExifTool quit")
                 self.buf += chunk
         out, self.buf = self.buf[:m.start()], self.buf[m.end():]
+        late = list(_READY.finditer(out))                           # (what came of a call that was given up on)
+        if late:
+            out = out[late[-1].end():]
         return out.decode("utf-8", "replace")
 
     def _once(self, args: tuple[str, ...], timeout: float) -> str:

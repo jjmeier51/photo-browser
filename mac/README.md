@@ -1236,6 +1236,20 @@ Videos are put together and upscaled with AVFoundation — a small helper Photo 
 when that's installed instead (`brew install ffmpeg`). Neither: videos come in their one-file version, not
 upscaled (the log says so). The browser needs Qt WebEngine (part of PySide6, set up by `run.sh`).
 
+### Dates from file names
+
+Right-click photos, videos or folders ▸ **Dates ▸ Set Dates from File Names…** (or the Photos menu). Every photo and
+video — inside the folders too — whose name holds a date gets that date as its own created and modified date:
+`johnmeier_2026_11_16_4398yr.mp4` becomes 16 November 2026, `something_2025_12_16_4389348934_3498349834.jpeg`
+16 December 2025 (at noon, when the name has no time), as do `IMG_20240613_101530`, `VID-20240613-WA0001`,
+"Screenshot 2024-06-13 at 10.15.30" and the like. The window lists every file with the date it found before
+anything changes. **Set** chooses whether the date also goes *inside* the photo or video as its capture date
+(where it has none — the default — or always), which is what the iPhone app's Year filter and Age go by. Names in
+another shape: type a pattern such as `name_%Y_%m_%d`. Undo (⌘Z) puts the file dates back.
+
+**Restore Capture Dates…** is the iPhone app's: for files a copy or an import stamped with "now", each one's date
+comes back from its name — or, when the name has none, from the date inside it.
+
 ### Exclusive (subscriber-only) posts from Instagram and Facebook
 
 If you subscribe to a creator on Instagram or Facebook, their **Exclusive** posts, reels, stories and photos now come

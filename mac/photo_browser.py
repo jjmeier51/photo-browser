@@ -6650,6 +6650,11 @@ class Pane(QWidget):
                 "Edit Metadata of Everything Inside…" if len(editable) == 1 else \
                 f"Edit Metadata of {len(editable)} Items…"
             menu.addAction(label, lambda: self.edit_metadata(editable)).setShortcut(QKeySequence("Ctrl+I"))
+        import name_dates
+        if any(os.path.isdir(p) or name_dates.is_media(p) for p in paths):
+            dates = menu.addMenu("Dates")
+            dates.addAction("Set Dates from File Names…", lambda: self.dates_from_names(paths))
+            dates.addAction("Restore Capture Dates…", lambda: self.dates_from_names(paths, restore=True))
         self._cover_menu(menu, paths)
         self._people_menu(menu, paths)
         menu.addSeparator()
@@ -6796,6 +6801,38 @@ class Pane(QWidget):
                 self._airdrop_noted(f"Updated the metadata of {n:,} file{'s' if n != 1 else ''}.")
 
         dlg = metadata_window.MetadataDialog(self.window(), paths, self.settings, done)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
+
+    # -- dates from file names (name_dates_window.py / name_dates.py; the iPhone app's Restore Capture Dates)
+    def dates_from_names(self, paths: list[str], restore: bool = False) -> None:
+        """Right-click ▸ Dates ▸ Set Dates from File Names… / Restore Capture Dates…: each photo and video (inside
+        folders too) gets the date in its name — or, restoring, the date inside it when the name has none — as its
+        own created and modified date; optionally as its capture date inside. Undo puts the file dates back."""
+        import name_dates
+        import name_dates_window
+
+        def done(result, restoring: bool) -> None:
+            changed = list(result.changed)
+            media_info.forget(changed)
+            self.refresh()
+            line = name_dates.summary(result, restoring)
+            if result.failed:
+                QMessageBox.warning(self.window(), "Set Dates", line + "\n\n" + "\n".join(
+                    f"{os.path.basename(p) or '—'}: {why}" for p, why in result.failed[:12]))
+            if not changed:
+                if not result.failed:
+                    self.note(line)
+                return
+
+            def undo() -> str:
+                n = name_dates.undo(result)
+                self.refresh()
+                kept = f" (the capture date written inside {len(result.embedded):,} stays)" if result.embedded else ""
+                return f"Put back the dates of {n:,} item{'s' if n != 1 else ''}{kept}."
+            self._undoable("Restore Capture Dates" if restoring else "Set Dates from File Names", undo, line)
+
+        dlg = name_dates_window.NameDatesDialog(self.window(), paths, self.settings, done, restore)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.open()
 

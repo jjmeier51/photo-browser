@@ -3434,6 +3434,44 @@ reported ("will come next time") rather than read by scrolling the profile page,
 against a stand-in of that log (lookups 429, a search 400 to direct asks, the page's feed asks told to log in): no
 switch, every feed direct, all 10 files; with the number already in the record, the lookup stops after its throttled call and goes straight to the feeds.
 
+### 6ao. Set Dates from File Names / Restore Capture Dates — `mac/name_dates.py`, `mac/name_dates_window.py` (Nov 16, 2026)
+
+"Some files have the filename name_year_month_day_filename.extension like johnmeier_2026_11_16_4398yr.mp4 or
+something_2025_12_16_4389348934_3498349834.jpeg. Create a function in the Mac app that parses the date and sets it
+to the new date of the file. Also look at the similar function in the iOS app and bring over those features."
+
+- **Where**: right-click photos, videos or folders ▸ **Dates ▸ Set Dates from File Names… / Restore Capture Dates…**;
+  Photos ▸ the same two (the selection, else the folder shown). Folders are walked; every photo and video in them,
+  WebM/GIF/MKV included (they get file dates only).
+- **Reading the name**: the Mac's one parser, `metadata_edit.date_from_name` — `name_YYYY_MM_DD_<id>`, with or
+  without a time after it (`_14_30_05`), IMG_/PXL_/VID-…-WA, "Screenshot … at 10.15.30", a Unix time, or a
+  strptime pattern typed in the window. A date with no time is **noon** (no zone moves its day); digits after the
+  date that aren't a real time are an id; a date in the future or one that doesn't exist (month 13) isn't one.
+- **What's set**: the file's own **created and modified dates, together** (`name_dates.set_file_dates` →
+  `clone_drive.set_dates` — never a bare `utime` after a creation date). Optionally the **capture date inside**
+  (`embed`: never / where there isn't one — the default for names / always), written by `metadata_edit.write`
+  (ExifTool in place; the tags the iPhone reads). Only files whose date differs are touched; the list shows each
+  file, the date found, where from, and the file's date now before anything changes.
+- **The iPhone's Restore Capture Dates** (`FileActions.restoreCaptureDates`), brought over: the name first, else
+  the capture date inside (ExifTool: DateTimeOriginal, CreateDate, the QuickTime dates…); file dates only by
+  default, as on the iPhone; its summary ("Restored N of M… from the file name… had no date… couldn't be
+  written"). Not brought over: the iPhone's last source, the originating Photos asset — the Mac has no Photos
+  link for drive files.
+- **Undo** (toast / ⌘Z): every changed file's dates before (access, modified, created) are put back; a capture
+  date written inside stays, and the undo line says so.
+- **iPhone fix** (`MetadataLoader.dateFromFilename`): a date followed by digits that weren't a real time
+  (`_2026_11_16_4398yr`: "43" taken as the hour) gave **no date at all**, so Restore Capture Dates skipped exactly
+  these files; now the date alone, at noon. (Written, not compiled here.)
+- **ExifTool session fix** (`simpcity.ExifSession`, used by Edit Metadata, the downloaders and this): ExifTool
+  prints nothing after a bare `-execute` when `-q` is among the arguments — so every kept-open read with `-q`
+  (all of Edit Metadata's) waited out its whole timeout (two minutes and more) before falling back to a one-off
+  run. Each command is now numbered (`-execute<N>`, which ExifTool always answers with `{ready<N>}`), and a call
+  waits for its own number only. Reads went from ~8 s (the test timeout) to milliseconds.
+
+Tested on Linux with ExifTool 12.76 (both example names, the usual camera names, future/impossible dates, a
+WebM, embedding, Restore from the date inside, Undo) and the window offscreen; creation dates (`setattrlist`)
+are macOS-only and weren't exercised.
+
 ### 7.4h Exclusive (subscriber-only) content in the Mac's Instagram and Facebook downloaders (Nov 16, 2026)
 
 "Ensure the Facebook and Instagram downloaders are able to download 'Exclusive' posts/content that the user is

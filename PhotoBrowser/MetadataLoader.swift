@@ -904,8 +904,9 @@ nonisolated enum MetadataLoader {
     }
 
     /// Best-effort capture date parsed from a filename (the app's own screenshot
-    /// names, IMG_/PXL_/VID_ camera names, WhatsApp, plain yyyy-MM-dd, or a unix
-    /// timestamp). Heuristic — used only when no embedded date exists.
+    /// names, IMG_/PXL_/VID_ camera names, WhatsApp, plain yyyy-MM-dd, `name_yyyy_MM_dd_<id>`,
+    /// or a unix timestamp). Heuristic — used only when no embedded date exists. Photo Browser
+    /// for Mac reads names the same way (`mac/name_dates.py`, `metadata_edit.date_from_name`).
     nonisolated static func dateFromFilename(_ name: String) -> Date? {
         let base = (name as NSString).deletingPathExtension
         var cal = Calendar(identifier: .gregorian); cal.timeZone = .current
@@ -921,6 +922,9 @@ nonisolated enum MetadataLoader {
         // 2. General yyyy MM dd [+ HH mm ss] with common separators.
         for g in allMatches(base, "(?<![0-9])((?:19|20)[0-9]{2})[-_.:]?([0-9]{2})[-_.:]?([0-9]{2})(?:[ _tT-]([0-9]{2})[-_.:]?([0-9]{2})[-_.:]?([0-9]{2})?)?") {
             if let date = build(Int(g[1]), Int(g[2]), Int(g[3]), Int(g[4]) ?? 12, Int(g[5]) ?? 0, Int(g[6]) ?? 0) { return date }
+            // Digits after the date that aren't a real time are an id, not a time ("johnmeier_2026_11_16_4398yr",
+            // "x_2025_12_16_4389348934_…"): the date alone, at noon, rather than no date at all.
+            if !g[4].isEmpty, let date = build(Int(g[1]), Int(g[2]), Int(g[3]), 12, 0, 0) { return date }
         }
         // 3. Bare unix timestamp (10-digit seconds or 13-digit milliseconds).
         if let g = firstMatch(base, "(?<![0-9])(1[0-9]{9}(?:[0-9]{3})?)(?![0-9])"), let v = Double(g[1]) {
