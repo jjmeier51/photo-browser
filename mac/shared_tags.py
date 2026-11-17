@@ -557,7 +557,7 @@ class TagStore:
                 except OSError:
                     pass                               # best effort: the tables still have them
 
-    def _edit(self, paths: Iterable[str], change: Callable[[list[str]], list[str]]) -> int:
+    def _edit(self, paths: Iterable[str], change: Callable[..., list[str]], by_path: bool = False) -> int:
         touched: dict[int, TagFile] = {}
         dirty: dict[int, TagFile] = {}
         writes: list[tuple[str, str, list[str]]] = []
@@ -571,7 +571,7 @@ class TagStore:
             if k is None:
                 continue
             before = t.files.get(k, [])
-            after = clean(change(list(before)))
+            after = clean(change(list(before), p) if by_path else change(list(before)))
             if after == before:
                 continue
             if after:
@@ -598,6 +598,16 @@ class TagStore:
             have = {fold(x) for x in cur}
             return cur + [x for x in tags if fold(x) not in have]
         return self._edit((p for p in paths if taggable(p)), change)
+
+    def add_each(self, wanted: dict[str, list[str]]) -> int:
+        """Each file gets its own tags added — one write of each table, however many different tags (a downloader
+        saving its files with "facebook", some "upscaled", some "exclusive"). Returns how many files gained any."""
+        want = {p: clean(t) for p, t in wanted.items() if taggable(p)}
+
+        def change(cur: list[str], p: str) -> list[str]:
+            have = {fold(x) for x in cur}
+            return cur + [x for x in want.get(p, []) if fold(x) not in have]
+        return self._edit((p for p in want if want[p]), change, by_path=True)
 
     def remove(self, paths: Iterable[str], tags: list[str]) -> int:
         """Takes the tags off the files. Returns how many files lost any."""

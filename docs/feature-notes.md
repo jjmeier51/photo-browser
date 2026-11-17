@@ -3583,6 +3583,65 @@ asks for a login, earlier downloads re-tagged). **Not run against the real sites
 undocumented; if a subscribed creator's exclusive posts come down untagged, a troubleshooting dump of one would
 show the key to add.
 
+### 7.4h-2 Facebook: the Subscriber Hub for real, Only exclusive, no hang on long runs (Nov 17, 2026)
+
+"The Facebook downloader is not downloading photos and videos from the Subscriber Hub and tagging them with
+'exclusive'. Add an option to just download the exclusive items, but ensure they are captured when doing a sweep
+of the full profile as well. After a while the downloader freezes the entire app… sometimes it runs 2–3 hours.
+See if it can be sped up."
+
+**Why the hub came up empty.** (1) It was read with a plain `fetch()` of guessed addresses — but a hub's posts are
+drawn by Facebook's own scripts (GraphQL answers while it scrolls), so the HTML a fetch gets holds next to nothing;
+(2) Facebook publishes no hub address — the guesses were the iPhone's, untested; (3) it came *last*, after a sweep
+of 2–3 hours, so a run that hung or was stopped never got there. Now (`facebook._hub`, module notes):
+- **First**, in every run; everything it finds goes in `seen`, so the sweep never takes it again untagged (and an
+  earlier download met there is tagged, `("tag", …)`). **Only exclusive** (window checkbox, `Options.exclusive_only`,
+  `facebook/exclusive_only` setting) stops after it — a quick run; it greys out "Check every photo again".
+- **Found as the person finds it**: the profile is opened in the window's browser and its tabs read
+  (`("visit", url, False, press, find)` → `"links"`, `LINKS_JS`); `tab_links` takes one named for subscribers —
+  "Subscriptions", "Exclusive", "Subscriber hub", "Supporters" (never the "Subscribe" sign-up) — or with such an
+  address; a second look presses "More" (`press` now also matches `[role=tab]`). Reports (Social Media Today) put
+  subscriber posts in a separate tab of the creator's profile with a purple crown badge.
+- **Read through the page**: the hub is opened in the browser and scrolled to its end; the watcher (fanfix.HOOK_JS)
+  now goes into Facebook pages too — **only those the run opens**, marked `#pbwatch` (`WATCH_MARK`; Facebook's
+  own feed left open would fill its box). `hub_media` takes sets (`pcb.` posts, albums), photos, videos and reels from
+  every answer and the HTML, whitespace-tolerant. The profile and cover pictures (`header_ids`) and the profile's
+  public albums are left out — they're on every page of the profile.
+- **A guessed address** (`hub_urls`, now also `/subscriptions` and `?sk=exclusive_content`) counts only if a quick
+  read is there, the page stays on a subscriber address (not sent back to the timeline) and its data says
+  subscribers (`social.exclusive_in_text`). Nothing found → what Facebook showed is saved to
+  `~/Library/Logs/<app>/facebook-hub-<name>-<time>.json` (stays on the Mac) for the next fix.
+
+**Why it hung, and what changed** (`social_downloader.py`). Measured here: reading a 3 MB photo page costs ~60 ms
+of regular expressions — not a hang alone, but all of it, and every page's JSON decode, ran on the window's thread
+between reads; and every 25 files the window rewrote the whole drive's tag table **three times** (once per tag) and
+the record, also on the window's thread — on a big drive's table that's seconds each time, so as downloads piled up
+the window was busy more than not, and the reads (which wait on the window) slowed with it.
+- **The run on its own thread** (`_Runner`: a one-thread pool steps the generator; requests go to the window by the
+  bridge signal; `_Later` decodes a page's JSON on the run's thread). Log lines are batched (up to 500 per hop) — a
+  request answered at once no longer nests a call inside a call. Instagram runs the same way.
+- **Saves**: every 45 s or 300 files (`SAVE_SECONDS`, `SAVE_EVERY`), one `TagStore.add_each({path: [tags]})` — a
+  single write of each tag table whatever tags differ.
+- **Long-run hygiene**: the window's browser is blank during a Facebook run (`_park` — Facebook's feed with autoplay
+  grows by gigabytes in hours) and back home after; the hidden page the reads come from is loaded afresh every 400
+  reads (`FRESH_EVERY`, `_fresh_api`).
+- **A trail if it ever happens again**: the log also goes to `~/Library/Logs/<app>/facebook-downloads.log` (last
+  ~5 MB, written twice a second), and a half-second heartbeat (`_beat`) logs any time the window was held up over
+  3 s and what the run was doing.
+- **Faster**: the per-minute ceiling now adapts — 50 to start, +5 after every 120 quick whole answers in a row, up to
+  75; any trouble drops it 10 below 50 (to no less than 30), to be earned back (`_Reader.ceiling`). Most of a long
+  run's time was reads (one per photo) plus the window's stalls; the stalls are gone and the reads go up to half as
+  fast again while Facebook is answering well. Second runs stay short (sets walked before stop early).
+
+Tested here: scripted Facebook answers (tab on the front / under More / none; hub answers with a post set, photos,
+a video, the profile picture and its album; guesses refused when sent to the timeline or with nothing saying
+subscribers, taken when they do; Only exclusive; an earlier download re-tagged; the sweep not re-taking hub items;
+the ceiling); the window with a scripted run (3,000 log lines in a row, 2 s of the run's own work while the window's
+timer kept ticking, downloads, one combined tag save, the log file); the browser side against a local mock served
+as www.facebook.com (tabs found, the watcher catching a page's own data answer, `#pbwatch` kept out of addresses).
+**Not run against facebook.com** — whether the hub tab is named as guessed, and what a scrolled hub loads, needs a
+subscribed account; if it still finds nothing, the saved `facebook-hub-*.json` holds the answer.
+
 ### Photo Browser for Mac: To Delete, beside Favorite (Nov 16, 2026)
 
 "Add a 'To Delete' button/tag next to the Favorite button. This then applies the 'to-delete' tag to the item."

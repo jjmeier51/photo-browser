@@ -1264,9 +1264,21 @@ If you subscribe to a creator on Instagram or Facebook, their **Exclusive** post
 down with everything else when you run Download Instagram/Facebook Profile… — as long as the window's browser is
 logged in as the account that subscribes. They're tagged **exclusive** (as well as instagram / facebook), so the
 sidebar's Tags ▸ exclusive or a search for `tag:exclusive` finds them. Exclusive things you downloaded before get
-the tag too the next time a run comes across them. On Facebook the creator's Subscriber Hub is read at the end of
-the run; the log says if there isn't one (you may not be subscribed). Posts that are locked for your login — only
-a blurred preview — are left, and the log counts them.
+the tag too the next time a run comes across them. Posts that are locked for your login — only a blurred preview —
+are left, and the log counts them.
+
+On Facebook the creator's subscriber content is read **first**: the window opens the profile in its browser, finds
+its tab for subscribers (Subscriptions / Exclusive, under More too), opens it and scrolls it to the end, then reads
+every photo and video it showed. Tick **Only exclusive** to get just that — a quick run; leave it off and the full
+download takes it first, then everything else. If nothing is found, the log says so and saves what Facebook showed
+in `~/Library/Logs/Photo Browser for Mac/facebook-hub-….json` (it stays on your Mac) — send that along if you are
+subscribed and it still comes up empty.
+
+Long Facebook runs no longer hold the app up: the reading happens off the window, the browser shows a blank page
+while it runs, and the tags are saved once every 45 seconds. The whole log is kept in
+`~/Library/Logs/Photo Browser for Mac/facebook-downloads.log`, with a line whenever the window was held up for more
+than 3 seconds and what it was doing at the time. Reads speed up (to 75 a minute) while Facebook answers well and slow
+down at the first sign it doesn't.
 
 ### To Delete
 

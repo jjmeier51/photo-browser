@@ -51,7 +51,11 @@ import social  # noqa: E402
 import app_identity
 
 LANES = 6                     # files downloaded at once (from the sites' photo/video servers, not their pages)
-SAVE_EVERY = 25               # the record is saved (and the files tagged) after this many files
+SAVE_EVERY = 300              # the record is saved (and the files tagged) after this many files…
+SAVE_SECONDS = 45             # …or this long after the last save, whichever comes first (each save writes the whole
+                              # drive's tag table and the record — every 25 files, that alone stalled long runs)
+FRESH_EVERY = 400             # Facebook: the hidden page the reads come from is loaded afresh after this many reads
+STALL = 3.0                   # seconds the window may be held up before the log says so (and what it was doing)
 CALL_TIMEOUT = 75.0           # seconds an API call / page read may take in the browser
 SMALL_PHOTO = 200 * 1024      # Facebook: photos under this are always upscaled 2×
 
@@ -67,13 +71,30 @@ KINDS = {
 }
 
 _PROFILE: QWebEngineProfile | None = None
-WATCH_HOST = r"(^|\.)instagram\.com$"     # the pages the watcher goes into (a regular expression on the host)
+
+# The page's links (and tabs) whose words or address match __FIND__ (a regular expression): [{text, href}].
+LINKS_JS = r"""(function () {
+  var re = new RegExp(__FIND__, 'i'), out = [], seen = {};
+  var els = document.querySelectorAll('a[href], [role=tab], [role=menuitem]');
+  for (var i = 0; i < els.length && out.length < 80; i++) {
+    var e = els[i], a = e.closest('a[href]') || e.querySelector('a[href]') || e;
+    var href = a.href || '', text = (e.innerText || e.getAttribute('aria-label') || '').trim().slice(0, 80);
+    if (!href || seen[href] || !(re.test(text) || re.test(href))) continue;
+    seen[href] = 1;
+    out.push({text: text, href: String(href)});
+  }
+  return JSON.stringify(out);
+})()"""
+WATCH_HOST = r"(^|\.)instagram\.com$"     # the pages the watcher goes into (a regular expression on the host)…
+WATCH_FB = r"(^|\.)facebook\.com$"         # …and Facebook's, only those the run opens itself (WATCH_MARK in the address:
+WATCH_MARK = "pbwatch"                      # Facebook's own feed, left open for hours, would fill the watcher's box)
 
 
 def profile() -> QWebEngineProfile:
     """One lasting browser profile for both sites: the logins survive restarts. Instagram's pages carry a small
     watcher put in before their own scripts (fanfix.HOOK_JS — a copy of each data answer the page receives, and
-    of the data written into it), so a profile page opened in the window can be read for what it shows."""
+    of the data written into it), so a profile page opened in the window can be read for what it shows; so do the
+    Facebook pages a run opens (`#pbwatch` on the address — the Subscriber Hub)."""
     global _PROFILE
     if _PROFILE is None:
         import fanfix
@@ -82,7 +103,8 @@ def profile() -> QWebEngineProfile:
         _PROFILE.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
         script = QWebEngineScript()
         script.setName("photobrowser-watch")
-        script.setSourceCode(f"if (/{WATCH_HOST}/.test(location.hostname)) {{\n" + fanfix.HOOK_JS + "\n}")
+        script.setSourceCode(f"if (/{WATCH_HOST}/.test(location.hostname) || (/{WATCH_FB}/.test(location.hostname) "
+                             f"&& location.hash.indexOf('{WATCH_MARK}') >= 0)) {{\n" + fanfix.HOOK_JS + "\n}")
         script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
         script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
         script.setRunsOnSubFrames(False)
@@ -94,26 +116,73 @@ class _Bridge(QObject):
     call = Signal(object, object)      # (callback, value) from a worker thread → back on the GUI thread
 
 
+class _Later:
+    """An answer still to be worked out — a page's JSON decoded — done on the run's own thread, not the window's."""
+
+    def __init__(self, fn) -> None:
+        self.fn = fn
+
+
 class _Runner:
-    """Drives one generator: each request it yields is carried out by `window.handle`, which calls back
-    with the answer; `on_end(error, returned)` runs when the generator finishes (or raises)."""
+    """Drives one generator: each request it yields is carried out by `window.handle` (on the window's thread),
+    which calls back with the answer; `on_end(error, returned)` runs when the generator finishes (or raises).
+
+    The generator itself runs on a thread of its own: everything it does between requests — reading multi-MB
+    pages with regular expressions, working out what's new — stays off the window's thread, so a run of hours
+    never holds the window up, and the window's work (downloads finishing, saves) never holds the reading up.
+    A request answered at once (a log line, items for the downloads) no longer nests a call inside a call either."""
 
     def __init__(self, window: "SocialWindow", gen, on_end) -> None:
         self.w, self.gen, self.on_end = window, gen, on_end
+        self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{window.kind}-run")
+        self.ended = False
+        self.doing = ""                                  # the last request, for the log when the window was held up
 
     def start(self) -> None:
         self.step(None)
 
     def step(self, value) -> None:
+        if not self.ended:
+            self.pool.submit(self._advance, value)
+
+    def _advance(self, value) -> None:
+        notes: list[str] = []                            # log lines need no answer: taken along with what follows
         try:
+            if isinstance(value, _Later):
+                value = value.fn()
             req = self.gen.send(value)
+            while req[0] == "note" and len(notes) < 500:
+                notes.append(req[1])
+                req = self.gen.send(None)
         except StopIteration as stop:
-            self.on_end(None, stop.value)
+            self.w.bridge.call.emit(lambda v: (self._notes(notes), self._end(None, v)), stop.value)
             return
         except Exception as e:  # noqa: BLE001 — a bug or a drive error must end the run, not hang it
-            self.on_end(e, None)
+            self.w.bridge.call.emit(lambda err: (self._notes(notes), self._end(err, None)), e)
             return
+        self.w.bridge.call.emit(self._handle, (notes, req))
+
+    def _notes(self, notes: list[str]) -> None:
+        for line in notes:
+            self.w._log(line)
+
+    def _handle(self, job) -> None:
+        notes, req = job
+        self._notes(notes)
+        if self.ended:
+            return
+        self.doing = str(req[0]) + (f" {req[1]}" if req[0] in ("page", "visit") else "")
         self.w.handle(req, self.step)
+
+    def _end(self, error, value) -> None:
+        if self.ended:
+            return
+        self.close()
+        self.on_end(error, value)
+
+    def close(self) -> None:
+        self.ended = True
+        self.pool.shutdown(wait=False)
 
 
 class SocialWindow(QMainWindow):
@@ -177,6 +246,12 @@ class SocialWindow(QMainWindow):
         self.full.setToolTip("Read every uploaded and tagged photo, even where an earlier run already got to the "
                              "end — finds an old photo tagged since. Slower.")
         self.full.setVisible(kind == "facebook")
+        self.only_excl = option("Only exclusive", "exclusive_only", False,
+                                "Only the subscriber-only content (the Subscriber Hub) — quick. A full download takes "
+                                "it too, first, tagged “exclusive” all the same.")
+        self.only_excl.setVisible(kind == "facebook")
+        self.only_excl.toggled.connect(lambda on: self.full.setEnabled(not on and not self.running))
+        self.full.setEnabled(not self.only_excl.isChecked())
         self.photos_2x = option("Upscale photos 2×", "photos2x", False,
                                 "Each photo twice the size, in place" +
                                 (" (photos under 200 KB always are)" if kind == "facebook" else ""))
@@ -201,7 +276,7 @@ class SocialWindow(QMainWindow):
         top.addWidget(self.go_btn)
         top.addWidget(self.stop_btn)
         row2 = QHBoxLayout()
-        for w in (self.tagged, self.stories, self.full, self.photos_2x, self.ai, self.videos_1080):
+        for w in (self.tagged, self.stories, self.only_excl, self.full, self.photos_2x, self.ai, self.videos_1080):
             row2.addWidget(w)
         row2.addStretch(1)
         row2.addWidget(login)
@@ -240,7 +315,48 @@ class SocialWindow(QMainWindow):
         if line == getattr(self, "_last_line", None):
             return                                   # the same line twice in a row (a problem, then the summary)
         self._last_line = line
-        self.log.appendPlainText(time.strftime("%H:%M:%S ") + line)
+        stamped = time.strftime("%H:%M:%S ") + line
+        self.log.appendPlainText(stamped)
+        self._log_file(stamped)
+
+    def _log_file(self, line: str) -> None:
+        """The log kept on this Mac as well (~/Library/Logs/<app>/<site>-downloads.log, the last ~5 MB), so a long
+        run's story is there after the window has closed — or after a hang. Written a couple of times a second."""
+        pending = getattr(self, "_file_lines", None)
+        if pending is None:
+            pending = self._file_lines = []
+            self._file_timer = QTimer(self)
+            self._file_timer.setSingleShot(True)
+            self._file_timer.timeout.connect(self._flush_log)
+        pending.append(time.strftime("%Y-%m-%d ") + line)
+        if not self._file_timer.isActive():
+            self._file_timer.start(500)
+
+    def _flush_log(self) -> None:
+        lines, self._file_lines = getattr(self, "_file_lines", None) or [], []
+        if not lines:
+            return
+        try:
+            folder = app_identity.logs()
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{self.kind}-downloads.log"
+            if path.exists() and path.stat().st_size > 5_000_000:
+                path.replace(path.with_suffix(".old.log"))
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except OSError:
+            pass
+
+    def _beat(self) -> None:
+        """Every half second while a run is on: if the window was held up (the timer came late), the log says for
+        how long and what the run was doing — the trail to follow should it ever stop answering again."""
+        now = time.monotonic()
+        late = now - getattr(self, "_beat_at", now) - 0.5
+        self._beat_at = now
+        if late > STALL and self.running:
+            runner = getattr(self, "runner", None)
+            self._log(f"   (the window was held up for {late:.1f} s"
+                      + (f" — while: {runner.doing[:120]}" if runner is not None and runner.doing else "") + ")")
 
     def _say(self, line: str) -> None:
         self.status.setText(line)
@@ -315,8 +431,10 @@ class SocialWindow(QMainWindow):
                                    ai=self.ai.isChecked() and self.engine is not None and self._ai_usable(),
                                    videos_1080=self.videos_1080.isChecked(), tagged=self.tagged.isChecked() or fbk,
                                    stories=self.stories.isChecked(), upscale_under=SMALL_PHOTO if fbk else 0,
-                                   full=fbk and self.full.isChecked())
-        for w in (self.go_btn, self.tagged, self.stories, self.full, self.photos_2x, self.ai, self.videos_1080, self.field):
+                                   full=fbk and self.full.isChecked() and not self.only_excl.isChecked(),
+                                   exclusive_only=fbk and self.only_excl.isChecked())
+        for w in (self.go_btn, self.tagged, self.stories, self.only_excl, self.full, self.photos_2x, self.ai,
+                  self.videos_1080, self.field):
             w.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.bar.setVisible(True)
@@ -356,7 +474,25 @@ class SocialWindow(QMainWindow):
         else:
             gen = fb.run(text, self.person, self._fb_already, self.opts)
         self._say(f"Reading {self.k['name']}…")
-        self._when_ready(lambda: _Runner(self, gen, self._crawled).start())
+        self.fb_reads = 0
+        self.last_save = time.monotonic()
+        self._beat_at = time.monotonic()
+        self.beat = QTimer(self)
+        self.beat.timeout.connect(self._beat)
+        self.beat.start(500)
+        if fbk:
+            self._park()
+
+        def go() -> None:
+            self.runner = _Runner(self, gen, self._crawled)
+            self.runner.start()
+        self._when_ready(go)
+
+    def _park(self) -> None:
+        """Facebook: while a run reads, the window's browser shows a blank page — its own feed (autoplaying videos,
+        live updates) left open for hours grows by gigabytes. The run opens its pages there when it needs to."""
+        self.view.setHtml("<html><body style='font:15px -apple-system,sans-serif;color:#888;padding:40px'>"
+                          "Downloading — the pages the run opens (the Subscriber Hub) show here.</body></html>")
 
     def _ai_usable(self) -> bool:
         """Real-ESRGAN applies when photos are upscaled: all of them (the box), or — on Facebook — always the
@@ -390,10 +526,11 @@ class SocialWindow(QMainWindow):
             self._log(video_tools.note)
 
     def _fb_already(self, folder: Path) -> set[str]:
+        """Asked by the run (on its own thread): the ids done in the profile's folder."""
         self.dest = folder
         self.record = fb.record(folder)
         ids = self.record.downloaded | fb.ids_on_disk(folder)
-        self._log(f"→ “{self._shown(folder)}” — {len(ids)} photo(s)/video(s) already here")
+        self.bridge.call.emit(self._log, f"→ “{self._shown(folder)}” — {len(ids)} photo(s)/video(s) already here")
         return ids
 
     def _shown(self, p: Path) -> str:
@@ -461,11 +598,13 @@ class SocialWindow(QMainWindow):
         if kind == "api":
             self._api(req[1], req[2], req[3], req[4] if len(req) > 4 else self.k["referer"], cb)
         elif kind == "visit":
-            self._visit(req[1], bool(req[2]), cb, req[3] if len(req) > 3 else "")
+            self._visit(req[1], bool(req[2]), cb, req[3] if len(req) > 3 else "", req[4] if len(req) > 4 else "")
         elif kind == "page":
-            start, result = fb.page_js(f"p{next(self.calls)}", req[1])
-            self._call(start, result, lambda r: cb((int(r.get("status") or 0), r.get("body") or "",
-                                                    r.get("url") or req[1])))
+            self.fb_reads = getattr(self, "fb_reads", 0) + 1
+            if self.fb_reads % FRESH_EVERY == 0:
+                self._fresh_api(lambda: self._page(req[1], cb))
+            else:
+                self._page(req[1], cb)
         elif kind == "sleep":
             QTimer.singleShot(int(max(0.0, float(req[1])) * 1000), lambda: cb(None))
         elif kind == "note":
@@ -483,6 +622,34 @@ class SocialWindow(QMainWindow):
             cb(None)
         else:
             raise ValueError(kind)
+
+    def _page(self, url: str, cb) -> None:
+        """A Facebook page read from the hidden page; its JSON is decoded on the run's thread (`_Later`)."""
+        start, result = fb.page_js(f"p{next(self.calls)}", url)
+
+        def decoded(raw):
+            try:
+                r = json.loads(raw) if isinstance(raw, str) else {}
+            except ValueError:
+                r = {}
+            r = r if isinstance(r, dict) else {}
+            return int(r.get("status") or 0), r.get("body") or "", r.get("url") or url
+        self._call(start, result, lambda raw: cb(_Later(lambda: decoded(raw))), raw=True)
+
+    def _fresh_api(self, then) -> None:
+        """The hidden page loaded afresh (what thousands of reads left behind in it goes), then `then()`."""
+        self.api_ready = False
+        self._api_tries = 0
+        waited = [0]
+
+        def tick() -> None:
+            waited[0] += 1
+            if self.api_ready or waited[0] > 60:      # (not ready after 30 s: the reads say so themselves)
+                then()
+                return
+            QTimer.singleShot(500, tick)
+        self.api.load(QUrl(self.k["robots"]))
+        QTimer.singleShot(500, tick)
 
     # ------------------------------------------------------------------ asking Instagram (the iPhone's route)
     def _api(self, url: str, form: str | None, app_id: str, referer: str, cb) -> None:
@@ -580,14 +747,19 @@ class SocialWindow(QMainWindow):
             return page
         return self.api
 
-    def _visit(self, url: str, scroll: bool, done, press: str = "") -> None:
+    def _visit(self, url: str, scroll: bool, done, press: str = "", find: str = "") -> None:
         """Opens `url` in the window's browser, as the person would, and hands back what the page loaded to draw
         it — its own data answers and its HTML — after it has settled, or (`scroll`) after it's been scrolled to
         its end, so it loads every post: {"answers": [...], "html": ..., "url": ..., "status": 200/404}. `press`: a
         button whose words match it (a regular expression) is pressed once the page is up — the desktop site's
-        "View story" in front of someone's stories — as the person would."""
+        "View story" in front of someone's stories — as the person would. `find`: the links on the page whose words
+        or address match it (a regular expression) come back too, as "links": [{text, href}] — a profile's tabs.
+        A Facebook page is opened with the watcher's mark (`WATCH_MARK`) and the browser is blank again after."""
         import fanfix
         page = self.view.page()
+        fbk = self.kind == "facebook"
+        if fbk and WATCH_MARK not in url:
+            url = url.split("#", 1)[0] + "#" + WATCH_MARK
         answers: list[str] = []
         state = {"idle": 0, "ticks": 0, "height": None, "began": time.monotonic(), "done": False}
         limit = 15 * 60 if scroll else 25
@@ -597,13 +769,29 @@ class SocialWindow(QMainWindow):
                 return
             state["done"] = True
 
+            links: list = []
+
             def got_html(html) -> None:
                 html = html if isinstance(html, str) else ""
                 title = re.search(r"<title[^>]*>([^<]*)</title>", html, re.I)
                 self.visited = True
-                done({"answers": answers, "html": html, "url": page.url().toString(),
+                where = page.url().toString().split("#" + WATCH_MARK, 1)[0]
+                if fbk and self.running:
+                    self._park()
+                done({"answers": answers, "html": html, "url": where, "links": links,
                       "status": 404 if title and "page not found" in title.group(1).lower() else 200})
-            page.runJavaScript("document.documentElement.outerHTML", 0, got_html)
+
+            def got_links(raw) -> None:
+                try:
+                    got = json.loads(raw) if isinstance(raw, str) else []
+                except ValueError:
+                    got = []
+                links.extend(x for x in got if isinstance(x, dict)) if isinstance(got, list) else None
+                page.runJavaScript("document.documentElement.outerHTML", 0, got_html)
+            if find:
+                page.runJavaScript(LINKS_JS.replace("__FIND__", json.dumps(find)), 0, got_links)
+            else:
+                page.runJavaScript("document.documentElement.outerHTML", 0, got_html)
 
         def drained(raw) -> None:
             if state["done"]:
@@ -656,36 +844,39 @@ class SocialWindow(QMainWindow):
                 pass
             if press:
                 js = ("(function(){var re=new RegExp(%s,'i');var b=[].slice.call(document.querySelectorAll("
-                      "'button,[role=button],div[role=button]')).find(function(e){return re.test(e.innerText||'');});"
+                      "'button,[role=button],div[role=button],[role=tab]')).find(function(e){"
+                      "return re.test(e.innerText||e.getAttribute('aria-label')||'');});"
                       "if(b){b.click();return true;}return false;})()") % json.dumps(press)
                 QTimer.singleShot(2000, lambda: page.runJavaScript(js, 0, lambda _r: QTimer.singleShot(2000, tick)))
                 return
             QTimer.singleShot(1500, tick)
 
-        self._log(f"   opening {url}")
+        self._log(f"   opening {url.split('#' + WATCH_MARK, 1)[0]}")
         page.loadFinished.connect(loaded)
         page.load(QUrl(url))
 
-    def _call(self, start_js: str, result_js: str, done, page: QWebEnginePage | None = None) -> None:
+    def _call(self, start_js: str, result_js: str, done, page: QWebEnginePage | None = None, raw: bool = False) -> None:
         """Runs `start_js` (a fetch) on the page (the hidden one by default) and polls `result_js` until it
-        answers."""
+        answers. `raw`: the answer's JSON text is handed on as it is, to be decoded elsewhere."""
         began = time.monotonic()
         page = page or self.api
 
         def poll() -> None:
             page.runJavaScript(result_js, 0, got)
 
-        def got(raw) -> None:
-            if raw:
-                import json
+        def got(answer) -> None:
+            if answer:
+                if raw:
+                    done(answer)
+                    return
                 try:
-                    r = json.loads(raw) if isinstance(raw, str) else {}
+                    r = json.loads(answer) if isinstance(answer, str) else {}
                 except ValueError:
                     r = {}
                 done(r if isinstance(r, dict) else {})
                 return
             if time.monotonic() - began > CALL_TIMEOUT:
-                done({"status": 0, "body": "no answer"})
+                done(json.dumps({"status": 0, "body": "no answer"}) if raw else {"status": 0, "body": "no answer"})
                 return
             # asked again soon: checking the page is local and cheap, and every moment between an answer
             # arriving and the next step was dead time on every one of thousands of reads
@@ -770,20 +961,22 @@ class SocialWindow(QMainWindow):
         self._say(f"Downloaded {len(self.written)} of {self.queued} found" +
                   (f" · {self.failed} failed" if self.failed else "") +
                   ("" if self.crawl_done else " · still looking…"))
-        if len(self.to_tag) >= SAVE_EVERY:
+        if len(self.to_tag) >= SAVE_EVERY or (self.to_tag and time.monotonic() - self.last_save >= SAVE_SECONDS):
             self._save()
         if self.crawl_done and self.settled_n >= self.queued:
             self._finish()
 
     def _save(self) -> None:
         """The record and the tags, so far."""
+        self.last_save = time.monotonic()
         if self.tags is not None and self.to_tag:
+            wanted: dict[str, list[str]] = {p: [self.mod.TAG] for p in self.to_tag}
+            for p in self.to_upscale_tag:
+                wanted.setdefault(p, []).append(social.UPSCALED_TAG)
+            for p in self.to_exclusive_tag:
+                wanted.setdefault(p, []).append(social.EXCLUSIVE_TAG)
             try:
-                self.tags.add(self.to_tag, [self.mod.TAG])
-                if self.to_upscale_tag:
-                    self.tags.add(self.to_upscale_tag, [social.UPSCALED_TAG])
-                if self.to_exclusive_tag:
-                    self.tags.add(self.to_exclusive_tag, [social.EXCLUSIVE_TAG])
+                self.tags.add_each(wanted)                 # one write of the tag table, however many tags
             except OSError as e:
                 self._log(f"Couldn't save the tags: {e}")
         self.to_tag, self.to_upscale_tag, self.to_exclusive_tag = [], [], []
@@ -827,6 +1020,10 @@ class SocialWindow(QMainWindow):
         if not self.running:
             return
         self.running = False
+        if getattr(self, "runner", None) is not None:
+            self.runner.close()
+        if getattr(self, "beat", None) is not None:
+            self.beat.stop()
         if getattr(self, "pool", None):
             self.pool.shutdown(wait=False, cancel_futures=True)
         outcome = getattr(self, "outcome", None)
@@ -862,9 +1059,13 @@ class SocialWindow(QMainWindow):
             line += f" {len(self.retagged)} earlier download{'s' if len(self.retagged) != 1 else ''} tagged " \
                     f"“{social.EXCLUSIVE_TAG}” (subscriber-only)."
         self._log(line)
+        self._flush_log()
         self._say(line)
-        for w in (self.go_btn, self.tagged, self.stories, self.full, self.photos_2x, self.videos_1080, self.field):
+        for w in (self.go_btn, self.tagged, self.stories, self.only_excl, self.photos_2x, self.videos_1080, self.field):
             w.setEnabled(True)
+        self.full.setEnabled(not self.only_excl.isChecked())
+        if self.kind == "facebook":
+            self.view.load(QUrl(self.k["home"]))         # the browser back for the person (it was blank for the run)
         self.ai.setEnabled(self._ai_usable())
         self.stop_btn.setEnabled(False)
         self.bar.setVisible(False)

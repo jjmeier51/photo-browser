@@ -74,6 +74,7 @@ class Options:
     stories: bool = True              # Instagram: current stories and highlights
     upscale_under: int = 0            # photos smaller than this (bytes) are upscaled 2× whatever photos_2x says
     full: bool = False                # Facebook: walk every set to its end, even one read before
+    exclusive_only: bool = False      # Facebook: only the subscriber-only (Exclusive) content — the Subscriber Hub
     method: str = ""                  # how photos are enlarged (upscale_methods: "ai:<model>", "clean", "sharp", "soft");
     factor: int = 2                   #   "" = as before (the AI's default model, else Sharp); how many times larger;
     texture: float = 0.0              #   and, for an AI method, how much of the plain enlargement is kept
