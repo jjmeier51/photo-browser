@@ -442,8 +442,9 @@ Python. (`SimpCityService`,
   never downloaded; earlier downloads are tagged when met again (`("tag", paths, tags)`). Not run against the real
   sites. **Facebook's hub is read first** (the profile's subscriber tab found and opened in the window's browser, the
   watcher on run-opened pages marked `#pbwatch`), **Only exclusive** stops there; the run's generator steps on its own
-  thread (`_Runner`) and saves are one `add_each` every 45 s — never parse or save per item on the window's thread
-  (§7.4h-2). **To Delete** (beside Favorite: viewer bin, right-click, Photos menu, ⇧⌘X) = the **"to-delete" tag**
+  thread (`_Runner`) and saves are one `add_each` every 90 s (retags of earlier downloads wait for it too) — never
+  parse or save per item on the window's thread; from the hub only posts' sets (`pcb.`) are walked, never an album
+  (§7.4h-2, §7.4h-3). **To Delete** (beside Favorite: viewer bin, right-click, Photos menu, ⇧⌘X) = the **"to-delete" tag**
   (`TO_DELETE_TAG`, `Pane.set_to_delete`, undoable; red bin mark on tiles) — nothing is deleted by it. §7.4h.
 - **Set Dates from File Names / Restore Capture Dates (Mac, Nov 16)** — right-click ▸ Dates ▸ … / Photos menu
   (`mac/name_dates.py`, `mac/name_dates_window.py`): the date in a name (`name_2026_11_16_<id>`, camera names,

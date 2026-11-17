@@ -1285,7 +1285,7 @@ in `~/Library/Logs/Photo Browser for Mac/facebook-hub-….json` (it stays on you
 subscribed and it still comes up empty.
 
 Long Facebook runs no longer hold the app up: the reading happens off the window, the browser shows a blank page
-while it runs, and the tags are saved once every 45 seconds. The whole log is kept in
+while it runs, and the tags are saved once every 90 seconds. The whole log is kept in
 `~/Library/Logs/Photo Browser for Mac/facebook-downloads.log`, with a line whenever the window was held up for more
 than 3 seconds and what it was doing at the time. Reads speed up (to 75 a minute) while Facebook answers well and slow
 down at the first sign it doesn't.

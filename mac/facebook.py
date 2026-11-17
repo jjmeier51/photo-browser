@@ -80,6 +80,7 @@ MAX_ITEMS = 10_000
 GAP, JITTER = 0.35, 0.4           # seconds between page reads, to begin with (it adapts — `_Reader`)
 MIN_GAP, MAX_GAP = 0.25, 8.0      # the most and the least it adapts to
 PER_MINUTE = 50                   # page reads in any 60 seconds to begin with…
+HUB_PATIENCE = 12                 # scroll steps with nothing new before the Subscriber Hub counts as read to its end
 FAST_PER_MINUTE = 75              # …raised a step after every EASED_AFTER quick, whole answers in a row, up to this
 SLOW_PER_MINUTE = 30              # …and cut at any sign of trouble, down to this
 EASED_AFTER = 120
@@ -353,9 +354,13 @@ def tab_links(seen: dict | None, html: str = "") -> list[str]:
         href = decode(href or "")
         if href.startswith("/"):
             href = HOST + href.lstrip("/")
-        host = (urlsplit(href).hostname or "").lower()
+        parts = urlsplit(href)
+        host = (parts.hostname or "").lower()
         if host != "www.facebook.com":
             return
+        # Facebook's click-tracking (__cft__, __tn__) and the page's own #fragment off: the plain address
+        query = "&".join(q for q in parts.query.split("&") if q and not q.startswith("__"))
+        href = urlunsplit(("https", host, parts.path, query, ""))
         if href not in out:
             out.append(href)
     for link in (seen or {}).get("links") or []:
@@ -768,8 +773,12 @@ def _hub(reader: _Reader, profile: "Profile", profile_page: str, skip: set[str],
     addresses tried (`hub_urls`), and one of those counts only if it stays on a subscriber address and its data
     says subscribers. The hub is opened in the browser and scrolled to its end — its posts are drawn by the page's
     own scripts, so a plain read of its address holds next to nothing — and every set, photo and video in what it
-    loaded is read: sets walked whole, photos and videos one by one. The profile and cover pictures (on every page
-    of the profile) and its public albums are left out."""
+    loaded is read: posts' photo sets (`pcb.`) walked whole, photos and videos one by one. The profile and cover
+    pictures (on every page of the profile) are left out, and **albums (`a.`) are never walked** from here: a
+    subscriber post of one photo links it in the creator's Timeline album (`set=a.…`), and walking that read the
+    whole public timeline as "exclusive" (Nov 17, a real run) — the photo itself is listed by its id and read alone.
+    The hub is scrolled with more patience than other pages (`HUB_PATIENCE` quiet steps): its posts arrive slowly,
+    and a short read found 5 photos where a long one found 87."""
     yield ("note", "Looking for subscriber-only (Exclusive) content…")
     keep_out = header_ids(profile_page) | {profile.id}
     front = yield ("visit", profile.url, False, "", TAB_FIND)
@@ -785,7 +794,6 @@ def _hub(reader: _Reader, profile: "Profile", profile_page: str, skip: set[str],
         links = tab_links(more)
     public_html = profile_page + (front.get("html") or "")
     keep_out |= header_ids(front.get("html") or "")
-    public_albums = {t for t in hub_media([public_html])[0] if t.startswith("a.")}
     if links:
         yield ("note", f"   the profile's subscriber tab: {_short(links[0])}")
     else:
@@ -812,7 +820,7 @@ def _hub(reader: _Reader, profile: "Profile", profile_page: str, skip: set[str],
                 yield ("note", f"   {_short(url)}: went to {_short(final)} instead")
                 continue
             extra = [got]
-        seen_h = yield ("visit", url, True)
+        seen_h = yield ("visit", url, True, "", "", HUB_PATIENCE)
         seen_h = seen_h if isinstance(seen_h, dict) else {}
         seen_h["asked"] = url
         visits.append(seen_h)
@@ -825,10 +833,13 @@ def _hub(reader: _Reader, profile: "Profile", profile_page: str, skip: set[str],
             continue
         texts = [a for a in seen_h.get("answers") or [] if isinstance(a, str)] + [html] + extra
         t, p, v = hub_media(texts)
-        t = [x for x in t if x not in public_albums]
+        albums = [x for x in t if not x.startswith("pcb.")]
+        t = [x for x in t if x.startswith("pcb.")]          # posts' photo sets only — never an album (docstring)
         p = [x for x in p if x not in keep_out]
-        yield ("note", f"   {_short(url)}: {len(seen_h.get('answers') or [])} answer(s) — {len(t)} set(s), "
-                       f"{len(p)} photo(s), {len(v)} video(s)")
+        yield ("note", f"   {_short(url)}: {len(seen_h.get('answers') or [])} answer(s) — {len(t)} post set(s), "
+                       f"{len(p)} photo(s), {len(v)} video(s)"
+                       + (f"; {len(albums)} album link(s) not walked (their photos here are read one by one)"
+                          if albums else ""))
         if not (t or p or v):
             continue
         if not from_tab and not any(social.exclusive_in_text(x) for x in texts):
@@ -836,11 +847,13 @@ def _hub(reader: _Reader, profile: "Profile", profile_page: str, skip: set[str],
             continue
         tokens, photos, videos, used = t, p, v, url
         break
+    texts = seen_h = front = None                          # (megabytes of answers: not kept through the walks)
     if not used:
         saved = dump_visits(visits, profile.vanity or profile.id)
         yield ("note", "   no subscriber-only content found — you may not be subscribed, or this profile has no "
                        "Subscriptions" + (f" (what Facebook showed is saved in {saved})" if saved else ""))
         return 0
+    visits.clear()
     before = count[0]
     for token in tokens:
         if reader.wall:

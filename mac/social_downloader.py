@@ -52,7 +52,7 @@ import app_identity
 
 LANES = 6                     # files downloaded at once (from the sites' photo/video servers, not their pages)
 SAVE_EVERY = 300              # the record is saved (and the files tagged) after this many files…
-SAVE_SECONDS = 45             # …or this long after the last save, whichever comes first (each save writes the whole
+SAVE_SECONDS = 90             # …or this long after the last save, whichever comes first (each save writes the whole
                               # drive's tag table and the record — every 25 files, that alone stalled long runs)
 FRESH_EVERY = 400             # Facebook: the hidden page the reads come from is loaded afresh after this many reads
 STALL = 3.0                   # seconds the window may be held up before the log says so (and what it was doing)
@@ -201,7 +201,7 @@ class SocialWindow(QMainWindow):
         self.cookies: dict[str, dict[str, str]] = {}
         self.calls = itertools.count(1)
         self.bridge = _Bridge()
-        self.bridge.call.connect(lambda cb, value: cb(value))
+        self.bridge.call.connect(self._on_window)
         self.settings = app_identity.settings()
         self.exiftool = sc.find_exiftool()
         self.setWindowTitle(f"{self.k['name']} — {self.person.name}")
@@ -347,6 +347,19 @@ class SocialWindow(QMainWindow):
         except OSError:
             pass
 
+    def _on_window(self, cb, value) -> None:
+        """Everything the run and the downloads hand the window comes through here — timed: a step of the window's
+        own that takes over a second is named in the log (the heartbeat only knows the window was held up)."""
+        began = time.monotonic()
+        cb(value)
+        took = time.monotonic() - began
+        if took > 1.0 and self.running:
+            runner = getattr(self, "runner", None)
+            what = {"_settled": "a finished download", "_handle": f"the run's request ({runner.doing[:80]})"
+                    if runner is not None else "the run's request", "_log": "the log"}.get(
+                getattr(cb, "__name__", ""), getattr(cb, "__name__", "") or "a step")
+            self._log(f"   (the window's own work took {took:.1f} s: {what})")
+
     def _beat(self) -> None:
         """Every half second while a run is on: if the window was held up (the timer came late), the log says for
         how long and what the run was doing — the trail to follow should it ever stop answering again."""
@@ -448,6 +461,7 @@ class SocialWindow(QMainWindow):
         self.to_exclusive_tag: list[str] = []
         self.exclusive_n = 0                               # subscriber-only files downloaded this run
         self.retagged: set[str] = set()                    # earlier downloads tagged "exclusive" this run
+        self.retag_pending: dict[str, list[str]] = {}       # …waiting for the next save
         self.done_keys: set[str] = set()
         self.failed_keys: set[str] = set()
         self.key_left: dict[str, int] = {}            # a post's files still downloading (a carousel has several)
@@ -598,7 +612,8 @@ class SocialWindow(QMainWindow):
         if kind == "api":
             self._api(req[1], req[2], req[3], req[4] if len(req) > 4 else self.k["referer"], cb)
         elif kind == "visit":
-            self._visit(req[1], bool(req[2]), cb, req[3] if len(req) > 3 else "", req[4] if len(req) > 4 else "")
+            self._visit(req[1], bool(req[2]), cb, req[3] if len(req) > 3 else "", req[4] if len(req) > 4 else "",
+                        int(req[5]) if len(req) > 5 else 6)
         elif kind == "page":
             self.fb_reads = getattr(self, "fb_reads", 0) + 1
             if self.fb_reads % FRESH_EVERY == 0:
@@ -747,13 +762,15 @@ class SocialWindow(QMainWindow):
             return page
         return self.api
 
-    def _visit(self, url: str, scroll: bool, done, press: str = "", find: str = "") -> None:
+    def _visit(self, url: str, scroll: bool, done, press: str = "", find: str = "", patience: int = 6) -> None:
         """Opens `url` in the window's browser, as the person would, and hands back what the page loaded to draw
         it — its own data answers and its HTML — after it has settled, or (`scroll`) after it's been scrolled to
         its end, so it loads every post: {"answers": [...], "html": ..., "url": ..., "status": 200/404}. `press`: a
         button whose words match it (a regular expression) is pressed once the page is up — the desktop site's
         "View story" in front of someone's stories — as the person would. `find`: the links on the page whose words
         or address match it (a regular expression) come back too, as "links": [{text, href}] — a profile's tabs.
+        `patience`: scroll steps in a row with nothing new (the page no taller, no new answers) before it counts as
+        the end.
         A Facebook page is opened with the watcher's mark (`WATCH_MARK`) and the browser is blank again after."""
         import fanfix
         page = self.view.page()
@@ -761,7 +778,7 @@ class SocialWindow(QMainWindow):
         if fbk and WATCH_MARK not in url:
             url = url.split("#", 1)[0] + "#" + WATCH_MARK
         answers: list[str] = []
-        state = {"idle": 0, "ticks": 0, "height": None, "began": time.monotonic(), "done": False}
+        state = {"idle": 0, "ticks": 0, "height": None, "began": time.monotonic(), "done": False, "seen": 0}
         limit = 15 * 60 if scroll else 25
 
         def finish() -> None:
@@ -824,10 +841,11 @@ class SocialWindow(QMainWindow):
                 st = json.loads(raw) if isinstance(raw, str) else {}
             except ValueError:
                 st = {}
-            grew = st.get("height") != state["height"] or bool(st.get("moved"))
+            grew = st.get("height") != state["height"] or bool(st.get("moved")) or len(answers) > state["seen"]
+            state["seen"] = len(answers)
             state["height"] = st.get("height")
             state["idle"] = 0 if grew else state["idle"] + 1
-            if state["idle"] >= 6:                           # the end of the page: nothing more loads
+            if state["idle"] >= patience:                    # the end of the page: nothing more loads
                 finish()
                 return
             self._say(f"Reading the page… {len(answers)} answer(s) so far")
@@ -967,10 +985,21 @@ class SocialWindow(QMainWindow):
             self._finish()
 
     def _save(self) -> None:
+        began = time.monotonic()
+        try:
+            self._save_now()
+        finally:
+            took = time.monotonic() - began
+            if took > 1.0:
+                self._log(f"   (saving the tags and the record took {took:.1f} s)")
+
+    def _save_now(self) -> None:
         """The record and the tags, so far."""
         self.last_save = time.monotonic()
-        if self.tags is not None and self.to_tag:
-            wanted: dict[str, list[str]] = {p: [self.mod.TAG] for p in self.to_tag}
+        if self.tags is not None and (self.to_tag or self.retag_pending):
+            wanted: dict[str, list[str]] = {p: list(t) for p, t in self.retag_pending.items()}
+            for p in self.to_tag:
+                wanted.setdefault(p, []).append(self.mod.TAG)
             for p in self.to_upscale_tag:
                 wanted.setdefault(p, []).append(social.UPSCALED_TAG)
             for p in self.to_exclusive_tag:
@@ -980,6 +1009,7 @@ class SocialWindow(QMainWindow):
             except OSError as e:
                 self._log(f"Couldn't save the tags: {e}")
         self.to_tag, self.to_upscale_tag, self.to_exclusive_tag = [], [], []
+        self.retag_pending = {}
         if self.record is not None and (self.done_keys or self.info):
             # A post is done once every file of it is in (a carousel's last item may still be downloading).
             done = {k for k in self.done_keys if self.key_left.get(k, 0) <= 0} - self.failed_keys
@@ -991,15 +1021,18 @@ class SocialWindow(QMainWindow):
                 self._log(f"Couldn't save the record: {e}")
 
     def _tag_existing(self, paths: list[str], tags: list[str]) -> None:
-        """Files downloaded on an earlier run that turn out to be subscriber-only: tagged now."""
+        """Files downloaded on an earlier run that turn out to be subscriber-only: tagged with the next save
+        (`_save`). Each used to be a write of the drive's whole tag table on the window's thread, there and then —
+        a run meeting hundreds of earlier downloads stalled the window seconds at a time (Nov 17)."""
         fresh = [p for p in paths if p not in self.retagged and os.path.isfile(p)]
         if not fresh or self.tags is None:
             return
-        try:
-            self.tags.add(fresh, tags)
-            self.retagged.update(fresh)
-        except OSError as e:
-            self._log(f"Couldn't save the tags: {e}")
+        for p in fresh:
+            self.retag_pending.setdefault(p, [])
+            self.retag_pending[p] += [t for t in tags if t not in self.retag_pending[p]]
+        self.retagged.update(fresh)
+        if time.monotonic() - self.last_save >= SAVE_SECONDS:
+            self._save()
 
     def _crawled(self, error, outcome) -> None:
         self.crawl_done = True

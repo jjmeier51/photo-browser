@@ -3680,6 +3680,29 @@ as www.facebook.com (tabs found, the watcher catching a page's own data answer, 
 **Not run against facebook.com** — whether the hub tab is named as guessed, and what a scrolled hub loads, needs a
 subscribed account; if it still finds nothing, the saved `facebook-hub-*.json` holds the answer.
 
+#### 7.4h-3 The first real hub run (Nov 17, evening)
+
+A run on a subscribed creator's profile found the hub — Facebook names the tab **"Supporters"**
+(`<vanity>/supporters/`, with click-tracking `__cft__`/`__tn__` and a `#?…` fragment on the link) — and showed two
+faults:
+- **It walked a public album as "exclusive".** A subscriber post of one photo links it as
+  `photo/?fbid=…&set=a.<Timeline album>`; the hub reader took every `set=` on the page for a subscriber set and
+  walked the album — the creator's whole timeline, each photo tagged "exclusive". Now only posts' photo sets
+  (`pcb.`) are walked from the hub; album links are counted in the log and their photos, listed by id on the hub,
+  are read one by one. (Photos tagged "exclusive" by that run may be wrong: remove the tag from the folder's
+  photos and run Only exclusive again — it tags the real ones.)
+- **The window stalled 3–6 s again and again (once 38 s).** Each earlier download met in the hub (or in that
+  album) was tagged on the spot: `_tag_existing` → `TagStore.add` → a write of the drive's whole tag table on the
+  window's thread, once per photo. Now they wait in `retag_pending` for the periodic save (`_save`: one
+  `add_each` with the new files' tags; every 90 s now, `SAVE_SECONDS`). The window also times its own work
+  (`_on_window`, every bridge callback, and `_save`) and logs any step over a second by name — the heartbeat
+  alone only said the window was held up "while: page …", which was the run's last request, not the cause.
+- **A short hub read found 5 photos, a long one 87.** The hub's posts arrive slowly; the scroll now waits
+  `HUB_PATIENCE` (12) quiet steps instead of 6, and new data answers count as the page still loading
+  (`_visit(..., patience)`; Instagram keeps 6).
+- The tab's address is cleaned (tracking parameters and fragment off) before it's opened and logged; the answers
+  read from the hub are let go before the walks (`texts`, `visits`).
+
 ### Photo Browser for Mac: To Delete, beside Favorite (Nov 16, 2026)
 
 "Add a 'To Delete' button/tag next to the Favorite button. This then applies the 'to-delete' tag to the item."
