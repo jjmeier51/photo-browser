@@ -388,6 +388,16 @@ HDR photos (a standard picture plus a gain map) show their standard picture, as 
 does the same for what it makes. Thumbnails of HEIC / HEIF / AVIF / JPEG XL photos made before this are
 made again, once, the first time each folder is shown.
 
+### More themes, Christmas wallpapers and typefaces
+
+View ▸ Theme… now has 70 looks: new everyday ones (Slate, Espresso, Nordic, Charcoal and Gold, Lavender Mist, Mint,
+Sand, Typewriter), a **Nature** set and a **Vivid** set, and ten Christmas themes with a **wallpaper** — little
+drawings tiled behind your files: Santa Claus, Let It Snow, Snowfall, Candy Cane Lane, Christmas Tree Farm, Deck the
+Halls (ornaments), Wrapped Presents, Holly Jolly, Gingerbread Village and Starry Christmas. Any theme you make can
+have one too: Custom ▸ **Wallpaper**. There are 14 more typefaces (Baskerville, Didot, Gill Sans, Optima, American
+Typewriter, Palatino, Cochin, Bodoni 72, Charter, Trebuchet, Avenir Next Condensed, Chalkduster, Party LET, Savoye
+LET). The iPhone app has the same themes, wallpapers and typefaces in Settings ▸ Appearance.
+
 ### A true grid, folder covers and themes
 
 **A true grid.** Two ways to have the pictures edge to edge, at any thumbnail size:

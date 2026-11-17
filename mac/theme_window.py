@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QColorDialog, QComboB
                                QWidget)
 
 import themes
+import wallpapers
 
 
 def paint_background(p: QPainter, rect: QRectF, colors: list[str], direction: str) -> None:
@@ -67,6 +68,11 @@ class Swatch(QAbstractButton):
             accent, light = "#0A84FF", False
         else:
             paint_background(p, box, self.look.colors, self.look.direction)
+            if self.look.wallpaper:                        # its pattern, smaller, so a few motifs show
+                p.save()
+                p.translate(box.topLeft())
+                wallpapers.paint(p, QRectF(0, 0, box.width(), box.height()), self.look.wallpaper, 0.42)
+                p.restore()
             accent, light = self.look.accent, self.look.light
         side = (box.width() - 4 * 7) / 3
         for i in range(3):                                 # a row of "pictures", one of them selected
@@ -213,8 +219,18 @@ class ThemeDialog(QDialog):
         self.light = QCheckBox("Light")
         self.light.setChecked(base.light)
         self.light.setToolTip("Dark text on a light background")
-        for w in (QLabel("Background"), self.c1, self.gradient, self.c2, self.direction, QLabel("Accent"), self.accent,
-                  QLabel("Typeface"), self.typeface, self.light):
+        self.wallpaper = QComboBox()
+        for key, title in wallpapers.choices():
+            self.wallpaper.addItem(title, key)
+        self.wallpaper.setCurrentIndex(max(0, self.wallpaper.findData(base.wallpaper)))
+        self.wallpaper.setToolTip("A pattern over the background, behind the files — the iPhone app has the same ones")
+        for w in (QLabel("Background"), self.c1, self.gradient, self.c2, self.direction, QLabel("Accent"), self.accent):
+            row.addWidget(w)
+        row.addStretch(1)
+        lay.addLayout(row)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        for w in (QLabel("Typeface"), self.typeface, QLabel("Wallpaper"), self.wallpaper, self.light):
             row.addWidget(w)
         row.addStretch(1)
         lay.addLayout(row)
@@ -224,6 +240,7 @@ class ThemeDialog(QDialog):
         self.light.toggled.connect(lambda _on: self._custom())
         self.direction.activated.connect(lambda _i: self._custom())
         self.typeface.activated.connect(lambda _i: self._custom())
+        self.wallpaper.activated.connect(lambda _i: self._custom())
 
         buttons = QHBoxLayout()
         revert = QPushButton("Revert")
@@ -341,7 +358,7 @@ class ThemeDialog(QDialog):
         return first
 
     def _show_in_controls(self, look: themes.Look) -> None:
-        for w in (self.gradient, self.light, self.direction, self.typeface):
+        for w in (self.gradient, self.light, self.direction, self.typeface, self.wallpaper):
             w.blockSignals(True)
         self.c1.set(look.colors[0])
         self.gradient.setChecked(len(look.colors) > 1)
@@ -351,7 +368,8 @@ class ThemeDialog(QDialog):
         self.accent.set(look.accent)
         self.typeface.setCurrentIndex(max(0, self.typeface.findData(look.typeface)))
         self.light.setChecked(look.light)
-        for w in (self.gradient, self.light, self.direction, self.typeface):
+        self.wallpaper.setCurrentIndex(max(0, self.wallpaper.findData(look.wallpaper)))
+        for w in (self.gradient, self.light, self.direction, self.typeface, self.wallpaper):
             w.blockSignals(False)
 
     def _choose(self, look: themes.Look | None, show: bool = False) -> None:
@@ -370,7 +388,7 @@ class ThemeDialog(QDialog):
     def _from_controls(self) -> themes.Look:
         colors = [self.c1.color] + ([self.c2.color] if self.gradient.isChecked() else [])
         return themes.Look("Custom", colors, self.accent.color, self.typeface.currentData(), self.light.isChecked(),
-                           self.direction.currentData())
+                           self.direction.currentData(), wallpaper=self.wallpaper.currentData() or "")
 
     def _custom(self) -> None:
         look = self._from_controls()

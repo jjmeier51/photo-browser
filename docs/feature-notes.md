@@ -2374,6 +2374,44 @@ On the Mac also:
   4.5:1 on their header before. (Candy Corn's lightest stop still gives white text only 4:1 — it's the iPhone's
   colours.)
 
+#### More themes, wallpapers and typefaces (Nov 17, 2026)
+
+"Add in 20 more themes. Also add in more Christmas themes with Santa wallpaper, snowflake wallpaper, candy cane
+wallpaper, Christmas tree wallpaper, etc. and add in more font options." Both apps, kept identical (a script
+compared the two lists value by value: 70 looks, same groups, order, colours, accents, typefaces, wallpapers).
+
+- **20 themes**: Everyday + Slate, Espresso, Nordic, Charcoal and Gold, Lavender Mist, Mint, Sand, Typewriter; a new
+  **Nature** set (Aurora, Desert Dusk, Deep Sea, Mountain Lake, Lavender Field, Cherry Blossom) and **Vivid** set
+  (Neon Night, Synthwave, Citrus, Electric Blue, Tropical, Coral Reef). Every one checked against `derive`'s floors
+  (text 7:1, grey text 4.5:1 on every stop, header and sidebar); three gradients were darkened at their light end
+  to get there.
+- **10 Christmas wallpaper themes**: Santa Claus (Santa), Let It Snow (snowflakes), Snowfall (blue snowflakes on
+  white), Candy Cane Lane (candy canes), Christmas Tree Farm (trees), Deck the Halls (ornaments), Wrapped Presents,
+  Holly Jolly (holly), Gingerbread Village (gingerbread men), Starry Christmas (stars). They're in the Christmas
+  set, so Follow the Seasons wears them too. Any custom look can take a wallpaper (Mac: Custom ▸ Wallpaper; iPhone:
+  Appearance ▸ Wallpaper), and My Themes keep it.
+- **Wallpapers — one drawing, two apps** (`mac/wallpapers.py`): each motif is plain shapes (filled polygons and
+  circles, strokes — a dashed one for a candy cane's stripes) in its own −1…1 box, scattered on a jittered grid
+  into a square tile at set sizes and angles; a motif crossing an edge is placed again across it, so tiles meet
+  without a seam. The Mac paints the tile with Qt into a pixmap at the screen's pixel ratio, **fades the finished
+  tile as one layer** (faded shape by shape, Santa's beard showed through his face) and tiles it under the items in
+  `BoxSelect.paintEvent` (both file views), fixed to the view. The iPhone gets the same shapes from the generated
+  `PhotoBrowser/Wallpapers.swift` — a JSON string read once (a literal of ~20,000 numbers would cost the compiler
+  minutes), drawn tile by tile by a `Canvas` (`WallpaperView`) with `.opacity` on the layer, under
+  `AppTheme.backgroundView`. `AppTheme.wallpaper` is optional, so saved themes decode as before. **Change a drawing
+  in wallpapers.py, then run `python3 mac/wallpapers.py --swift`.**
+- **Readability**: each pattern has a strength (0.30–0.42); `derive` adds the pattern's colours over each background
+  stop (at 60 % of that strength — the motifs are sparse) to the grounds text must read on.
+- **14 typefaces** (27 in all) on both: Baskerville, Didot, Gill Sans, Optima, American Typewriter, Palatino, Cochin,
+  Bodoni 72, Charter, Trebuchet, Avenir Next Condensed, Chalkduster, Party LET, Savoye LET — all shipped with macOS
+  and iOS (iPhone by PostScript name, regular + bold face; a name iOS doesn't know falls back to the system font as
+  the existing families do).
+
+Tested on the Mac (offscreen): every pattern drawn alone and tiled (seams checked), the window in Santa Claus, Let It
+Snow, Candy Cane Lane and Christmas Tree Farm, the chooser (swatches with their wallpapers, Custom ▸ Wallpaper, My
+Themes keeping it, 27 typefaces), the earlier theme tests. **The iPhone side isn't compiled** (no Xcode here):
+`Wallpapers.swift`, the `AppTheme` additions and the Appearance picker need a build.
+
 ### Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py`
 
 What the first version couldn't do: say *which* copy to keep except in identical groups, look across two

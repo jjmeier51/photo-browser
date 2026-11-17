@@ -3,9 +3,10 @@ import UIKit
 
 /// The app's look, as chosen in Settings ▸ Appearance: the background behind the browsing
 /// surfaces (a solid colour or a gradient), the accent colour (chips, buttons, selection),
-/// the typeface, and whether the chrome is dark or light. Ready-made themes — everyday,
-/// Halloween, Thanksgiving, Christmas and Holiday sets — are just values of this; "Custom" is whatever the pickers
-/// say. Stored by `Library` (`photoBrowser.theme`, JSON) so it's one app-wide value.
+/// the typeface, whether the chrome is dark or light, and a wallpaper — a pattern of Santas, snowflakes, candy canes,
+/// trees… over the background (`Wallpapers.swift`, drawn from the same shapes as Photo Browser for Mac's). Ready-made
+/// themes — everyday, nature, vivid, Halloween, Thanksgiving, Christmas and Holiday sets, kept in step with
+/// `mac/themes.py` — are just values of this; "Custom" is whatever the pickers say. Stored by `Library` (`photoBrowser.theme`, JSON) so it's one app-wide value.
 ///
 /// How it reaches the screen: `AppGradient` (the background every browsing screen sits on)
 /// draws `background`; the root applies `.tint`, `.preferredColorScheme`, `.fontDesign` and
@@ -62,6 +63,8 @@ struct AppTheme: Codable, Equatable, Sendable {
     enum FontChoice: String, Codable, CaseIterable, Sendable {
         case system, rounded, serif, mono
         case avenir, georgia, futura, chalkboard, markerFelt, noteworthy, copperplate, bradleyHand, snellRoundhand
+        case baskerville, didot, gillSans, optima, americanTypewriter, palatino, cochin, bodoni, charter, trebuchet
+        case avenirCondensed, chalkduster, partyLET, savoye
 
         var title: String {
             switch self {
@@ -78,6 +81,20 @@ struct AppTheme: Codable, Equatable, Sendable {
             case .copperplate: return "Copperplate"
             case .bradleyHand: return "Bradley Hand"
             case .snellRoundhand: return "Snell Roundhand"
+            case .baskerville: return "Baskerville"
+            case .didot: return "Didot"
+            case .gillSans: return "Gill Sans"
+            case .optima: return "Optima"
+            case .americanTypewriter: return "American Typewriter"
+            case .palatino: return "Palatino"
+            case .cochin: return "Cochin"
+            case .bodoni: return "Bodoni 72"
+            case .charter: return "Charter"
+            case .trebuchet: return "Trebuchet"
+            case .avenirCondensed: return "Avenir Next Condensed"
+            case .chalkduster: return "Chalkduster"
+            case .partyLET: return "Party LET"
+            case .savoye: return "Savoye LET"
             }
         }
         /// The system design, for the four design choices.
@@ -102,6 +119,20 @@ struct AppTheme: Codable, Equatable, Sendable {
             case .copperplate: return "Copperplate"
             case .bradleyHand: return "BradleyHandITCTT-Bold"
             case .snellRoundhand: return "SnellRoundhand-Bold"
+            case .baskerville: return "Baskerville"
+            case .didot: return "Didot"
+            case .gillSans: return "GillSans"
+            case .optima: return "Optima-Regular"
+            case .americanTypewriter: return "AmericanTypewriter"
+            case .palatino: return "Palatino-Roman"
+            case .cochin: return "Cochin"
+            case .bodoni: return "BodoniSvtyTwoITCTT-Book"
+            case .charter: return "Charter-Roman"
+            case .trebuchet: return "TrebuchetMS"
+            case .avenirCondensed: return "AvenirNextCondensed-Regular"
+            case .chalkduster: return "Chalkduster"
+            case .partyLET: return "PartyLetPlain"
+            case .savoye: return "SavoyeLetPlain"
             default: return nil
             }
         }
@@ -117,6 +148,20 @@ struct AppTheme: Codable, Equatable, Sendable {
             case .copperplate: return "Copperplate-Bold"
             case .bradleyHand: return "BradleyHandITCTT-Bold"
             case .snellRoundhand: return "SnellRoundhand-Black"
+            case .baskerville: return "Baskerville-Bold"
+            case .didot: return "Didot-Bold"
+            case .gillSans: return "GillSans-SemiBold"
+            case .optima: return "Optima-Bold"
+            case .americanTypewriter: return "AmericanTypewriter-Bold"
+            case .palatino: return "Palatino-Bold"
+            case .cochin: return "Cochin-Bold"
+            case .bodoni: return "BodoniSvtyTwoITCTT-Bold"
+            case .charter: return "Charter-Bold"
+            case .trebuchet: return "TrebuchetMS-Bold"
+            case .avenirCondensed: return "AvenirNextCondensed-DemiBold"
+            case .chalkduster: return "Chalkduster"
+            case .partyLET: return "PartyLetPlain"
+            case .savoye: return "SavoyeLetPlain"
             default: return nil
             }
         }
@@ -127,6 +172,9 @@ struct AppTheme: Codable, Equatable, Sendable {
     var accent: RGB
     var typeface: FontChoice
     var light: Bool
+    /// A pattern over the background (`Wallpapers`: "santa", "snowflakes", "candyCanes", "trees"…), nil for none —
+    /// the same drawings Photo Browser for Mac lays behind its files.
+    var wallpaper: String? = nil
 
     // MARK: - What the views ask for
 
@@ -150,11 +198,16 @@ struct AppTheme: Codable, Equatable, Sendable {
     var defaultFont: Font? { typeface.postScriptName == nil ? nil : font(.body) }
 
     @ViewBuilder var backgroundView: some View {
-        switch background {
-        case .solid(let c):
-            c.color
-        case .gradient(let cs, let dir):
-            LinearGradient(colors: cs.map(\.color), startPoint: dir.points.0, endPoint: dir.points.1)
+        ZStack {
+            switch background {
+            case .solid(let c):
+                c.color
+            case .gradient(let cs, let dir):
+                LinearGradient(colors: cs.map(\.color), startPoint: dir.points.0, endPoint: dir.points.1)
+            }
+            if let wallpaper, Wallpapers.tile(wallpaper) != nil {
+                WallpaperView(key: wallpaper)
+            }
         }
     }
 
@@ -196,6 +249,50 @@ struct AppTheme: Codable, Equatable, Sendable {
                      accent: RGB(hex: 0xFFB703), typeface: .system, light: false),
             AppTheme(name: "Paper", background: .gradient([RGB(hex: 0xFFFFFF), RGB(hex: 0xEDEDF2)], .down),
                      accent: RGB(hex: 0x0A84FF), typeface: .serif, light: true),
+            AppTheme(name: "Slate", background: .gradient([RGB(hex: 0x1E2A36), RGB(hex: 0x0F1720)], .down),
+                     accent: RGB(hex: 0x7FB3D5), typeface: .avenir, light: false),
+            AppTheme(name: "Espresso", background: .gradient([RGB(hex: 0x2B1D16), RGB(hex: 0x120B08)], .down),
+                     accent: RGB(hex: 0xD9A066), typeface: .georgia, light: false),
+            AppTheme(name: "Nordic", background: .gradient([RGB(hex: 0x2E3440), RGB(hex: 0x3B4252)], .down),
+                     accent: RGB(hex: 0x88C0D0), typeface: .charter, light: false),
+            AppTheme(name: "Charcoal and Gold", background: .gradient([RGB(hex: 0x141414), RGB(hex: 0x232323)], .down),
+                     accent: RGB(hex: 0xD4AF37), typeface: .didot, light: false),
+            AppTheme(name: "Lavender Mist", background: .gradient([RGB(hex: 0xF5F0FF), RGB(hex: 0xE4DAF7)], .down),
+                     accent: RGB(hex: 0x6B4FBB), typeface: .optima, light: true),
+            AppTheme(name: "Mint", background: .gradient([RGB(hex: 0xF0FBF6), RGB(hex: 0xD5F2E5)], .down),
+                     accent: RGB(hex: 0x13866F), typeface: .gillSans, light: true),
+            AppTheme(name: "Sand", background: .gradient([RGB(hex: 0xFBF6EC), RGB(hex: 0xEFE3CC)], .down),
+                     accent: RGB(hex: 0xA0522D), typeface: .baskerville, light: true),
+            AppTheme(name: "Typewriter", background: .solid(RGB(hex: 0xF2EFE6)),
+                     accent: RGB(hex: 0x3A3A3A), typeface: .americanTypewriter, light: true),
+        ]),
+        ThemeGroup(name: "Nature", themes: [
+            AppTheme(name: "Aurora", background: .gradient([RGB(hex: 0x0B1A2E), RGB(hex: 0x0E3B43), RGB(hex: 0x1D5C4A)], .diagonal),
+                     accent: RGB(hex: 0x7CFFCB), typeface: .rounded, light: false),
+            AppTheme(name: "Desert Dusk", background: .gradient([RGB(hex: 0x2A1424), RGB(hex: 0x5E2A24), RGB(hex: 0x7E4426)], .diagonal),
+                     accent: RGB(hex: 0xFFE3B3), typeface: .palatino, light: false),
+            AppTheme(name: "Deep Sea", background: .gradient([RGB(hex: 0x001219), RGB(hex: 0x003845), RGB(hex: 0x005F73)], .down),
+                     accent: RGB(hex: 0x94D2BD), typeface: .avenirCondensed, light: false),
+            AppTheme(name: "Mountain Lake", background: .gradient([RGB(hex: 0x14242D), RGB(hex: 0x22454A), RGB(hex: 0x33564C)], .down),
+                     accent: RGB(hex: 0xE8F1E4), typeface: .gillSans, light: false),
+            AppTheme(name: "Lavender Field", background: .gradient([RGB(hex: 0x2A1E4A), RGB(hex: 0x4B3A7A)], .diagonal),
+                     accent: RGB(hex: 0xD7C6FF), typeface: .optima, light: false),
+            AppTheme(name: "Cherry Blossom", background: .gradient([RGB(hex: 0xFFF0F5), RGB(hex: 0xFBD3E0)], .down),
+                     accent: RGB(hex: 0xC2185B), typeface: .cochin, light: true),
+        ]),
+        ThemeGroup(name: "Vivid", themes: [
+            AppTheme(name: "Neon Night", background: .gradient([RGB(hex: 0x0A0014), RGB(hex: 0x1A0033)], .down),
+                     accent: RGB(hex: 0xFF2EC4), typeface: .futura, light: false),
+            AppTheme(name: "Synthwave", background: .gradient([RGB(hex: 0x1A0B3B), RGB(hex: 0x5B1A6B), RGB(hex: 0x8E1450)], .diagonal),
+                     accent: RGB(hex: 0x2DE2E6), typeface: .futura, light: false),
+            AppTheme(name: "Citrus", background: .gradient([RGB(hex: 0x2B2A06), RGB(hex: 0x4A3B00)], .down),
+                     accent: RGB(hex: 0xFFD60A), typeface: .rounded, light: false),
+            AppTheme(name: "Electric Blue", background: .gradient([RGB(hex: 0x000B1F), RGB(hex: 0x00296B)], .down),
+                     accent: RGB(hex: 0x00C2FF), typeface: .avenir, light: false),
+            AppTheme(name: "Tropical", background: .gradient([RGB(hex: 0x002B27), RGB(hex: 0x004A42), RGB(hex: 0x005E54)], .diagonal),
+                     accent: RGB(hex: 0xFFCA3A), typeface: .rounded, light: false),
+            AppTheme(name: "Coral Reef", background: .gradient([RGB(hex: 0x2E0F1E), RGB(hex: 0x6B1F3A), RGB(hex: 0x9E2F40)], .down),
+                     accent: RGB(hex: 0xFFD3B6), typeface: .trebuchet, light: false),
         ]),
         ThemeGroup(name: "Halloween", themes: [
             AppTheme(name: "Pumpkin Patch", background: .gradient([RGB(hex: 0x1A0A00), RGB(hex: 0x3D1A00), RGB(hex: 0x000000)], .down),
@@ -250,6 +347,26 @@ struct AppTheme: Codable, Equatable, Sendable {
                      accent: RGB(hex: 0xF4D35E), typeface: .markerFelt, light: false),
             AppTheme(name: "North Pole", background: .gradient([RGB(hex: 0xF4FBFF), RGB(hex: 0xCFE8F7)], .down),
                      accent: RGB(hex: 0xC1121F), typeface: .rounded, light: true),
+            AppTheme(name: "Santa Claus", background: .gradient([RGB(hex: 0x8B0A0A), RGB(hex: 0x5A0505)], .down),
+                     accent: RGB(hex: 0xFFE8A3), typeface: .partyLET, light: false, wallpaper: "santa"),
+            AppTheme(name: "Let It Snow", background: .gradient([RGB(hex: 0x0B1F3A), RGB(hex: 0x16365E)], .down),
+                     accent: RGB(hex: 0xDFF3FF), typeface: .rounded, light: false, wallpaper: "snowflakes"),
+            AppTheme(name: "Snowfall", background: .gradient([RGB(hex: 0xFFFFFF), RGB(hex: 0xE6F2FF)], .down),
+                     accent: RGB(hex: 0x1F5FAD), typeface: .baskerville, light: true, wallpaper: "snowflakesBlue"),
+            AppTheme(name: "Candy Cane Lane", background: .gradient([RGB(hex: 0xFFF7F7), RGB(hex: 0xFFE6E6)], .down),
+                     accent: RGB(hex: 0xC8102E), typeface: .rounded, light: true, wallpaper: "candyCanes"),
+            AppTheme(name: "Christmas Tree Farm", background: .gradient([RGB(hex: 0x0B3D20), RGB(hex: 0x062615)], .down),
+                     accent: RGB(hex: 0xFFD166), typeface: .charter, light: false, wallpaper: "trees"),
+            AppTheme(name: "Deck the Halls", background: .gradient([RGB(hex: 0x1B1035), RGB(hex: 0x2E1050)], .down),
+                     accent: RGB(hex: 0xFFC300), typeface: .didot, light: false, wallpaper: "ornaments"),
+            AppTheme(name: "Wrapped Presents", background: .gradient([RGB(hex: 0x3A0A12), RGB(hex: 0x14324A)], .diagonal),
+                     accent: RGB(hex: 0xFFE066), typeface: .americanTypewriter, light: false, wallpaper: "presents"),
+            AppTheme(name: "Holly Jolly", background: .gradient([RGB(hex: 0x0F2E1C), RGB(hex: 0x1D4430)], .down),
+                     accent: RGB(hex: 0xFF6B6B), typeface: .cochin, light: false, wallpaper: "holly"),
+            AppTheme(name: "Gingerbread Village", background: .gradient([RGB(hex: 0x4A2A14), RGB(hex: 0x2E190B)], .down),
+                     accent: RGB(hex: 0xFFF1DC), typeface: .chalkduster, light: false, wallpaper: "gingerbread"),
+            AppTheme(name: "Starry Christmas", background: .gradient([RGB(hex: 0x050B24), RGB(hex: 0x101C4A)], .down),
+                     accent: RGB(hex: 0xFFE08A), typeface: .palatino, light: false, wallpaper: "stars"),
         ]),
         ThemeGroup(name: "Holiday", themes: [
             AppTheme(name: "Holiday Lights", background: .gradient([RGB(hex: 0x0B0F1A), RGB(hex: 0x141B2D)], .down),
@@ -275,7 +392,8 @@ struct AppTheme: Codable, Equatable, Sendable {
 
     /// A preset this equals (by its looks, not its name), if any.
     var matchingPreset: AppTheme? {
-        Self.presets.first { $0.background == background && $0.accent == accent && $0.typeface == typeface && $0.light == light }
+        Self.presets.first { $0.background == background && $0.accent == accent && $0.typeface == typeface && $0.light == light
+            && ($0.wallpaper ?? "") == (wallpaper ?? "") }
     }
 
     // MARK: - Storage

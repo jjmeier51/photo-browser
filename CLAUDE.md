@@ -184,7 +184,10 @@ actions the app makes no network calls.
   through the drive's `.Photo Browser Metadata/folder-covers.json` + `covers/` (later `at` wins; `""` = removed,
   `at` 0 = automatic); the iPhone stamps chosen covers (`coverStamps`, `noteCoverChosen`) and merges in
   `syncFolderCovers` (from `syncDriveTags`). **Themes** (`mac/themes.py` mirrors `AppTheme.groups` — keep in step:
-  Everyday, Halloween, Thanksgiving, Christmas, Holiday; `Theme(dark, look)`, `THEME.on_accent` for anything drawn
+  Everyday, Nature, Vivid, Halloween, Thanksgiving, Christmas, Holiday — 70 looks, 27 typefaces; a look may carry a
+  **wallpaper** (Santa, snowflakes, candy canes, trees, ornaments, presents, holly, gingerbread, stars) drawn once in
+  `mac/wallpapers.py`, which writes `PhotoBrowser/Wallpapers.swift` (`python3 mac/wallpapers.py --swift` — never edit
+  that file by hand); `Theme(dark, look)`, `THEME.on_accent` for anything drawn
   on the accent; `derive` keeps text / grey text / on-accent text above contrast floors — don't bypass it. Mac only:
   My Themes (`my_themes`), Follow the Seasons (`themes.seasonal`, `chosen_look` vs `current_look`), Surprise Me). **Search** (`mac/search_query.py`):
   phrases, `-not`, `tag:`/`#`, `is:`, `in:`, `date:`/`before:`/`after:`, accent- and separator-blind, words match

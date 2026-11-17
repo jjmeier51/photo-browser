@@ -135,6 +135,7 @@ class Theme:
         self.on_accent = "#FFFFFF"                     # text and marks drawn on the accent colour
         self.accent_text = ""                          # the accent where it is itself text (kept readable)
         self.content_css = ""                          # the file views' background, when it's a gradient
+        self.wallpaper = ""                            # a pattern over it (wallpapers.py), "" = none
         if look is not None:
             self.dark = not look.light
             for name, value in themes.derive(look).items():
@@ -2215,6 +2216,17 @@ class BoxSelect:
     of it a box has to touch (`box_rect`)."""
 
     pane: "Pane"
+
+    def paintEvent(self, event) -> None:  # noqa: N802 — Qt override
+        """The theme's wallpaper (wallpapers.py) under the files — fixed to the view, not scrolling with it, painted
+        over the background before the view draws its items."""
+        if THEME.wallpaper:
+            import wallpapers
+            vp = self.viewport()                      # type: ignore[attr-defined]
+            painter = QPainter(vp)
+            wallpapers.paint(painter, QRectF(vp.rect()), THEME.wallpaper)
+            painter.end()
+        super().paintEvent(event)                     # type: ignore[misc]
 
     def _box_init(self) -> None:
         self._band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())   # type: ignore[attr-defined]

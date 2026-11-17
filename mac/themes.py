@@ -11,6 +11,10 @@ palette; `theme_window.py` is the chooser.
 Kept in Photo Browser for Mac's settings as JSON (`theme`); empty = Match macOS. The preset names and colours are the
 iPhone app's — keep the two lists in step.
 
+**Wallpapers** (Nov 17): a look may lay a pattern over its background — Santa, snowflakes, candy canes, trees,
+ornaments, presents, holly, gingerbread, stars (`wallpaper`, drawn by wallpapers.py, the iPhone's from the same
+drawings); its colours count among the grounds text must read on (`derive`).
+
 Two things are the Mac's own: **My Themes** (custom looks saved under a name — `looks_from_json`, `with_saved`;
 setting `my_themes`) and **Follow the Seasons** (`seasonal`: through the holidays the window wears that season's
 themes, a different one each day, and goes back to the chosen theme afterwards; setting `theme_seasonal`).
@@ -37,6 +41,20 @@ TYPEFACES: dict[str, tuple[str, list[str]]] = {
     "copperplate": ("Copperplate", ["Copperplate"]),
     "bradleyHand": ("Bradley Hand", ["Bradley Hand"]),
     "snellRoundhand": ("Snell Roundhand", ["Snell Roundhand"]),
+    "baskerville": ("Baskerville", ["Baskerville"]),
+    "didot": ("Didot", ["Didot"]),
+    "gillSans": ("Gill Sans", ["Gill Sans"]),
+    "optima": ("Optima", ["Optima"]),
+    "americanTypewriter": ("American Typewriter", ["American Typewriter"]),
+    "palatino": ("Palatino", ["Palatino"]),
+    "cochin": ("Cochin", ["Cochin"]),
+    "bodoni": ("Bodoni 72", ["Bodoni 72"]),
+    "charter": ("Charter", ["Charter"]),
+    "trebuchet": ("Trebuchet", ["Trebuchet MS"]),
+    "avenirCondensed": ("Avenir Next Condensed", ["Avenir Next Condensed"]),
+    "chalkduster": ("Chalkduster", ["Chalkduster"]),
+    "partyLET": ("Party LET", ["Party LET"]),
+    "savoye": ("Savoye LET", ["Savoye LET"]),
 }
 
 
@@ -116,10 +134,14 @@ class Look:
     light: bool = False
     direction: str = "down"
     group: str = field(default="", compare=False)
+    wallpaper: str = ""                  # a pattern over the background (wallpapers.py), "" = none
 
     def to_json(self) -> str:
-        return json.dumps({"name": self.name, "colors": self.colors, "direction": self.direction,
-                           "accent": self.accent, "typeface": self.typeface, "light": self.light})
+        d = {"name": self.name, "colors": self.colors, "direction": self.direction,
+             "accent": self.accent, "typeface": self.typeface, "light": self.light}
+        if self.wallpaper:
+            d["wallpaper"] = self.wallpaper
+        return json.dumps(d)
 
     @staticmethod
     def from_json(text) -> "Look | None":
@@ -135,19 +157,24 @@ class Look:
             return None
         if not valid_color(d.get("accent")):
             return None
+        import wallpapers
+        paper = d.get("wallpaper") if isinstance(d.get("wallpaper"), str) else ""
         return Look(str(d.get("name") or "Custom")[:60], [c.upper() for c in colors], d["accent"].upper(),
                     d["typeface"] if isinstance(d.get("typeface"), str) and d["typeface"] in TYPEFACES else "system",
                     bool(d.get("light")),
-                    d["direction"] if isinstance(d.get("direction"), str) and d["direction"] in DIRECTIONS else "down")
+                    d["direction"] if isinstance(d.get("direction"), str) and d["direction"] in DIRECTIONS else "down",
+                    wallpaper=paper if wallpapers.pattern(paper) is not None else "")
 
     def same_looks(self, other: "Look") -> bool:
-        return (self.colors, self.accent, self.typeface, self.light, self.direction if len(self.colors) > 1 else "") == \
-            (other.colors, other.accent, other.typeface, other.light, other.direction if len(other.colors) > 1 else "")
+        return (self.colors, self.accent, self.typeface, self.light, self.direction if len(self.colors) > 1 else "",
+                self.wallpaper) == \
+            (other.colors, other.accent, other.typeface, other.light, other.direction if len(other.colors) > 1 else "",
+             other.wallpaper)
 
 
 def _l(group: str, name: str, colors: list[str], accent: str, typeface: str = "system", light: bool = False,
-       direction: str = "down") -> Look:
-    return Look(name, colors, accent, typeface, light, direction, group)
+       direction: str = "down", wallpaper: str = "") -> Look:
+    return Look(name, colors, accent, typeface, light, direction, group, wallpaper)
 
 
 # The iPhone app's presets (AppTheme.groups), in its order.
@@ -160,6 +187,26 @@ PRESETS: list[Look] = [
     _l("Everyday", "Forest", ["#0B2A1A", "#02110A"], "#7ED957", "rounded"),
     _l("Everyday", "Sunset", ["#2D0A4E", "#7A1F3D", "#C2410C"], "#FFB703", direction="diagonal"),
     _l("Everyday", "Paper", ["#FFFFFF", "#EDEDF2"], "#0A84FF", "serif", light=True),
+    _l("Everyday", "Slate", ["#1E2A36", "#0F1720"], "#7FB3D5", "avenir"),
+    _l("Everyday", "Espresso", ["#2B1D16", "#120B08"], "#D9A066", "georgia"),
+    _l("Everyday", "Nordic", ["#2E3440", "#3B4252"], "#88C0D0", "charter"),
+    _l("Everyday", "Charcoal and Gold", ["#141414", "#232323"], "#D4AF37", "didot"),
+    _l("Everyday", "Lavender Mist", ["#F5F0FF", "#E4DAF7"], "#6B4FBB", "optima", light=True),
+    _l("Everyday", "Mint", ["#F0FBF6", "#D5F2E5"], "#13866F", "gillSans", light=True),
+    _l("Everyday", "Sand", ["#FBF6EC", "#EFE3CC"], "#A0522D", "baskerville", light=True),
+    _l("Everyday", "Typewriter", ["#F2EFE6"], "#3A3A3A", "americanTypewriter", light=True),
+    _l("Nature", "Aurora", ["#0B1A2E", "#0E3B43", "#1D5C4A"], "#7CFFCB", "rounded", direction="diagonal"),
+    _l("Nature", "Desert Dusk", ["#2A1424", "#5E2A24", "#7E4426"], "#FFE3B3", "palatino", direction="diagonal"),
+    _l("Nature", "Deep Sea", ["#001219", "#003845", "#005F73"], "#94D2BD", "avenirCondensed"),
+    _l("Nature", "Mountain Lake", ["#14242D", "#22454A", "#33564C"], "#E8F1E4", "gillSans"),
+    _l("Nature", "Lavender Field", ["#2A1E4A", "#4B3A7A"], "#D7C6FF", "optima", direction="diagonal"),
+    _l("Nature", "Cherry Blossom", ["#FFF0F5", "#FBD3E0"], "#C2185B", "cochin", light=True),
+    _l("Vivid", "Neon Night", ["#0A0014", "#1A0033"], "#FF2EC4", "futura"),
+    _l("Vivid", "Synthwave", ["#1A0B3B", "#5B1A6B", "#8E1450"], "#2DE2E6", "futura", direction="diagonal"),
+    _l("Vivid", "Citrus", ["#2B2A06", "#4A3B00"], "#FFD60A", "rounded"),
+    _l("Vivid", "Electric Blue", ["#000B1F", "#00296B"], "#00C2FF", "avenir"),
+    _l("Vivid", "Tropical", ["#002B27", "#004A42", "#005E54"], "#FFCA3A", "rounded", direction="diagonal"),
+    _l("Vivid", "Coral Reef", ["#2E0F1E", "#6B1F3A", "#9E2F40"], "#FFD3B6", "trebuchet"),
     _l("Halloween", "Pumpkin Patch", ["#1A0A00", "#3D1A00", "#000000"], "#FF7A00", "chalkboard"),
     _l("Halloween", "Witching Hour", ["#120024", "#2A0A4A"], "#39D353", "chalkboard", direction="diagonal"),
     _l("Halloween", "Haunted House", ["#0E0E10"], "#C41E3A", "markerFelt"),
@@ -184,6 +231,17 @@ PRESETS: list[Look] = [
     _l("Christmas", "Christmas Eve", ["#050B24", "#0E1B4D", "#1B0B33"], "#FFE08A", "serif"),
     _l("Christmas", "Santa's Workshop", ["#5A0A0A", "#2E0505"], "#F4D35E", "markerFelt"),
     _l("Christmas", "North Pole", ["#F4FBFF", "#CFE8F7"], "#C1121F", "rounded", light=True),
+    _l("Christmas", "Santa Claus", ["#8B0A0A", "#5A0505"], "#FFE8A3", "partyLET", wallpaper="santa"),
+    _l("Christmas", "Let It Snow", ["#0B1F3A", "#16365E"], "#DFF3FF", "rounded", wallpaper="snowflakes"),
+    _l("Christmas", "Snowfall", ["#FFFFFF", "#E6F2FF"], "#1F5FAD", "baskerville", light=True, wallpaper="snowflakesBlue"),
+    _l("Christmas", "Candy Cane Lane", ["#FFF7F7", "#FFE6E6"], "#C8102E", "rounded", light=True, wallpaper="candyCanes"),
+    _l("Christmas", "Christmas Tree Farm", ["#0B3D20", "#062615"], "#FFD166", "charter", wallpaper="trees"),
+    _l("Christmas", "Deck the Halls", ["#1B1035", "#2E1050"], "#FFC300", "didot", wallpaper="ornaments"),
+    _l("Christmas", "Wrapped Presents", ["#3A0A12", "#14324A"], "#FFE066", "americanTypewriter", direction="diagonal",
+       wallpaper="presents"),
+    _l("Christmas", "Holly Jolly", ["#0F2E1C", "#1D4430"], "#FF6B6B", "cochin", wallpaper="holly"),
+    _l("Christmas", "Gingerbread Village", ["#4A2A14", "#2E190B"], "#FFF1DC", "chalkduster", wallpaper="gingerbread"),
+    _l("Christmas", "Starry Christmas", ["#050B24", "#101C4A"], "#FFE08A", "palatino", wallpaper="stars"),
     _l("Holiday", "Holiday Lights", ["#0B0F1A", "#141B2D"], "#FFC857", "rounded"),
     _l("Holiday", "Festival of Lights", ["#0A2A66", "#061A40"], "#E8EEF9", "serif"),
     _l("Holiday", "Kwanzaa", ["#0E0E0E", "#3D0A0A", "#0B3317"], "#F2C037", "futura", direction="diagonal"),
@@ -252,13 +310,17 @@ def derive(look: Look) -> dict[str, str]:
         }
     # Small grey text has to be readable on every stop of the background and on the header and sidebar.
     grounds = list(look.colors) + [out["header"], out["sidebar"], out["panel"]]
+    if look.wallpaper:                                   # where the pattern is, text sits on its colours too
+        import wallpapers
+        for c in look.colors:
+            grounds += wallpapers.grounds(look.wallpaper, c)
     toward = black if look.light else white
     out["text"] = readable(out["text"], grounds, 7.0, toward)
     out["secondary"] = readable(out["secondary"], grounds, 4.5, toward)
     out["tertiary"] = readable(out["tertiary"], grounds, 3.0, toward)
     out.update(accent=accent, accent_pill=pill, on_accent=on_accent,
                accent_text=readable(accent, grounds, 4.5, toward),       # the accent, where it's used *as* text
-               content_css=gradient_css(look.colors, look.direction))
+               content_css=gradient_css(look.colors, look.direction), wallpaper=look.wallpaper)
     return out
 
 
@@ -289,7 +351,7 @@ MINE = "My Themes"
 def with_saved(looks: list[Look], look: Look, name: str) -> list[Look]:
     """`looks` with `look` kept under `name` — replacing the one of that name, else added at the end."""
     name = " ".join(name.split())[:60] or "My Theme"
-    kept = Look(name, list(look.colors), look.accent, look.typeface, look.light, look.direction, MINE)
+    kept = Look(name, list(look.colors), look.accent, look.typeface, look.light, look.direction, MINE, look.wallpaper)
     out = [kept if o.name == name else o for o in looks]
     return out if any(o.name == name for o in looks) else out + [kept]
 

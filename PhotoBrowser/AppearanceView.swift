@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Settings ▸ Appearance: pick a ready-made theme (everyday, Halloween, Thanksgiving, Christmas, Holiday) or build
-/// your own — background (one colour or a gradient), accent colour, typeface, dark or light.
+/// Settings ▸ Appearance: pick a ready-made theme (everyday, nature, vivid, Halloween, Thanksgiving, Christmas, Holiday)
+/// or build your own — background (one colour or a gradient), a wallpaper over it (Santa, snowflakes, candy canes…),
+/// accent colour, typeface, dark or light.
 /// Every change applies at once, so the app behind the sheet shows it; the pickers always
 /// show what's in force, and choosing a theme loads it into them.
 struct AppearanceView: View {
@@ -15,6 +16,7 @@ struct AppearanceView: View {
     @State private var accent: Color = .blue
     @State private var font: AppTheme.FontChoice = .system
     @State private var light = false
+    @State private var wallpaper = ""          // "" = none
     @State private var loading = true          // the pickers are being filled from the theme, not edited
 
     private var theme: AppTheme { library.theme }
@@ -54,6 +56,17 @@ struct AppearanceView: View {
                 }
             } header: {
                 Text("Background")
+            }
+
+            Section {
+                Picker("Wallpaper", selection: $wallpaper) {
+                    Text("None").tag("")
+                    ForEach(Wallpapers.all, id: \.key) { Text($0.title).tag($0.key) }
+                }
+            } header: {
+                Text("Wallpaper")
+            } footer: {
+                Text("A pattern over the background, behind your photos — the same ones as Photo Browser for Mac's.")
             }
 
             Section {
@@ -100,6 +113,7 @@ struct AppearanceView: View {
         .onChange(of: accent) { commit() }
         .onChange(of: font) { commit() }
         .onChange(of: light) { commit() }
+        .onChange(of: wallpaper) { commit() }
     }
 
     // MARK: - Preview and swatches
@@ -172,6 +186,7 @@ struct AppearanceView: View {
         accent = t.accent.color
         font = t.typeface
         light = t.light
+        wallpaper = t.wallpaper ?? ""
         DispatchQueue.main.async { loading = false }
     }
 
@@ -185,7 +200,8 @@ struct AppearanceView: View {
         let background: AppTheme.Background = useGradient
             ? .gradient((threeStops ? [stops[0], stops[1], stops[2]] : [stops[0], stops[2]]).map(AppTheme.RGB.init), direction)
             : .solid(AppTheme.RGB(solid))
-        var t = AppTheme(name: "Custom", background: background, accent: AppTheme.RGB(accent), typeface: font, light: light)
+        var t = AppTheme(name: "Custom", background: background, accent: AppTheme.RGB(accent), typeface: font, light: light,
+                         wallpaper: wallpaper.isEmpty ? nil : wallpaper)
         if let preset = t.matchingPreset { t.name = preset.name }
         library.setTheme(t)
     }
