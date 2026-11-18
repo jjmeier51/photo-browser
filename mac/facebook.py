@@ -519,6 +519,7 @@ class _Reader:
         self.recent: list[float] = []          # when the reads of the last minute went
         self.reads = 0
         self.ceiling = PER_MINUTE              # reads allowed in any 60 seconds now
+        self.last_start = 0.0                  # when the last read went out
         self.good = 0                          # quick, whole answers since the last trouble or raise
 
     def trouble(self) -> None:
@@ -540,9 +541,14 @@ class _Reader:
             self.good = 0
 
     def _wait(self) -> float:
-        """Seconds to wait before the next read: the gap (jittered), the penalty, and the per-minute cap."""
-        wait = self.gap * (1 + random.uniform(-JITTER, JITTER)) + self.penalty
+        """Seconds to wait before the next read: the spacing (jittered) **from the last read's start** — the
+        larger of the eased gap and the per-minute ceiling spread evenly, so the page's own load time counts and
+        reads come at an even pace rather than after each answer plus a pause (Nov 18) — then the penalty, and the
+        per-minute cap."""
         now = self.clock()
+        spacing = max(self.gap, 60.0 / max(1, self.ceiling)) * (1 + random.uniform(-JITTER, JITTER))
+        since = now - self.last_start if self.last_start else spacing
+        wait = max(0.0, spacing - since) + self.penalty
         self.recent = [t for t in self.recent if now - t < 60]
         if len(self.recent) >= self.ceiling:
             wait = max(wait, self.recent[-self.ceiling] + 60 - now)
@@ -554,6 +560,7 @@ class _Reader:
             yield ("sleep", self._wait())
             self.penalty = max(0.0, self.penalty - GAP)
             began = self.clock()
+            self.last_start = began
             self.recent.append(began)
             self.reads += 1
             status, html, final = yield ("page", url)
@@ -925,6 +932,7 @@ def run(link: str, person: Path, already_for, opts: social.Options):
                     tokens.append(f"a.{a}")
     resumes = record(folder).get("albums")
     resumes = resumes if isinstance(resumes, dict) and not opts.full else {}
+    albums_whole = bool(tokens)                  # every album walked to its end this run (the uploads set is theirs)
     for token in tokens:
         keys_a: set[str] = set()
         ends: dict = {}
@@ -933,6 +941,7 @@ def run(link: str, person: Path, already_for, opts: social.Options):
                                                  resume=resumes.get(token), ends=ends))
         if finished and ends:
             out.albums[token] = (keys_a, ends)
+        albums_whole = albums_whole and finished and not reader.wall
     # Uploads, then every photo it's tagged in — credited to whoever posted them. Each stops early only when
     # it was walked to its end before (module notes).
     sets = [("photos_by", f"pb.{profile.id}.-2207520000", ["pb.", "a."], False),
@@ -951,13 +960,19 @@ def run(link: str, person: Path, already_for, opts: social.Options):
                 token = decode(t)
             first_id = first_media_id(tab_page)
         early = not opts.full and bool(walked.get(name))
+        by_albums = False
+        if name == "photos_by" and albums_whole and not early and not opts.full:
+            # Every uploaded photo is in one of the albums, and every album was just walked to its end: the uploads
+            # set only needs reading until it meets KNOWN_RUN of them in a row (its newest first).
+            early = by_albums = True
+            yield ("note", "   uploads: every album was just read whole — reading uploads only until they catch up")
         if not early:
             yield ("note", f"   {'uploads' if name == 'photos_by' else 'tagged photos'}: reading every one "
                            + ("(as asked)" if opts.full else "(the set hasn't been read to its end before)"))
         keys: set[str] = set()
         _n, finished = yield from counting(_walk(reader, token, first_id, skip, seen, folder, from_page, early,
                                                  name, profile.name, keys))
-        out.sets[name] = (finished, keys)
+        out.sets[name] = (finished and not by_albums, keys)   # caught up with the albums: not "read to its end"
     # Videos: the tab lists them; each watch page holds the file's address.
     if not reader.wall:
         yield ("note", "Finding videos…")

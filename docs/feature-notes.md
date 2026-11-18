@@ -3760,6 +3760,28 @@ pool with the real ExifTool (each photo its own date); the combined tag save; bo
 against tikwm.com or simpcity.cr** — if SimpCity now says "too many requests" more often, the gap backs off by
 itself; `PAGE_GAP` is the one number to raise.
 
+#### 7.4e-2 Instagram and Facebook, faster without pushing Meta (Nov 18, 2026)
+
+"Speed up the Instagram and Facebook downloaders for Mac too, without getting rate limited by Meta." The rule kept:
+**the requests Meta counts — Instagram's API, Facebook's pages — are not made any faster than their limits.**
+Instagram's API pacing stays the iPhone's (`_Calls`: 0.17 s ± half after each answer, rare longer pauses, +2.5 s per
+"slow down"); Facebook stays under its per-minute ceiling (50, earned up to 75, cut at any trouble). What changed is
+everything around them:
+- **Facebook reads at an even pace** (`_Reader._wait`): spacing from the last read's *start*, the larger of the eased
+  gap and the ceiling spread over the minute (60 / ceiling) — before, each read waited for the answer and then a
+  pause, which ran well under the ceiling (~44 a minute at 1 s answers; now ~48–55, never over the ceiling). A 429,
+  a 5xx or an empty shell still doubles the gap and lowers the ceiling.
+- **Facebook skips most of the uploads walk** when every album was just walked to its end in the same run: the
+  uploads set (`pb.`, Facebook's newest ~100) is made of album photos, so it's read only until `KNOWN_RUN` (12) in a
+  row are ones just read — ~12 pages instead of ~100 on a first run. Not recorded as walked (`out.sets` → False),
+  and an album that didn't finish means the uploads are read whole as before.
+- **Downloads** (both, Meta's CDN — not counted with the API): 8 lanes (were 6); dates and captions through
+  `simpcity.ExifPool` (3 ExifTools); a DASH video's picture and sound fetched at the same time (`social.download`)
+  instead of one after the other — Instagram's best videos come that way.
+Tested: the reader with 1 s answers (an even pace at the ceiling, never over it, trouble still slows it); the
+uploads shortcut and its fallback; a DASH download with both halves at once; the earlier Facebook, Instagram and
+exclusive tests. **Not run against Meta's sites.**
+
 #### 7.4h-3 The first real hub run (Nov 17, evening)
 
 A run on a subscribed creator's profile found the hub — Facebook names the tab **"Supporters"**

@@ -50,7 +50,9 @@ import simpcity as sc  # noqa: E402
 import social  # noqa: E402
 import app_identity
 
-LANES = 6                     # files downloaded at once (from the sites' photo/video servers, not their pages)
+LANES = 8                     # files downloaded at once (from the sites' photo/video servers — Meta's CDN, not the
+                              # pages or the API, which are paced on their own; was 6)
+EXIF_SESSIONS = 3             # ExifTools writing dates/captions side by side (simpcity.ExifPool)
 SAVE_EVERY = 300              # the record is saved (and the files tagged) after this many files…
 SAVE_SECONDS = 90             # …or this long after the last save, whichever comes first (each save writes the whole
                               # drive's tag table and the record — every 25 files, that alone stalled long runs)
@@ -471,7 +473,7 @@ class SocialWindow(QMainWindow):
         self.record: social.Record | None = None
         self.info: dict = {}
         self.crawl_done = False
-        self.exif = sc.ExifSession(self.exiftool) if self.exiftool else None
+        self.exif = sc.ExifPool(self.exiftool, EXIF_SESSIONS) if self.exiftool else None
         self.heavy = threading.Lock()
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=LANES, thread_name_prefix=f"{self.kind}-dl")
         if self.opts.videos_1080 or self.kind == "instagram":

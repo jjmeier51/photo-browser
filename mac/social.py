@@ -275,8 +275,16 @@ def download(item: Item, tmp: str, tries: list[dict[str, str]]) -> tuple[str | N
     out = os.path.join(tmp, item.filename)
     if item.video and item.audio:
         import video_tools
-        v, why = fetch(item.url, out + ".video", tries)
-        a, why_a = fetch(item.audio, out + ".audio", tries) if v else (None, why)
+        from concurrent.futures import ThreadPoolExecutor
+        # the picture and the sound at the same time (the CDN's files, not the API): they used to come one after
+        # the other
+        with ThreadPoolExecutor(max_workers=1) as side:
+            sound = side.submit(fetch, item.audio, out + ".audio", tries)
+            v, why = fetch(item.url, out + ".video", tries)
+            a, why_a = sound.result()
+        if not v and a:
+            os.remove(a)
+            a, why_a = None, why
         if v and a and video_tools.mux(v, a, out, item.date, item.lat, item.lng):
             for p in (v, a):
                 os.remove(p)
