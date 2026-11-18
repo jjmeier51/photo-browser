@@ -329,7 +329,8 @@ actions the app makes no network calls.
 count (its reactions bar, not the member's sidebar "Reaction score") into the record by post; sort by
 "Reaction Score" (Photo Browser for Mac) / "Most reactions" (iPhone, `SimpCityScores`); Photo Browser for Mac's right-click ▸
 Get Reaction Scores re-reads a folder's threads for them alone. Page scripts are identical in Swift and
-Python. (`SimpCityService`,
+Python. **Paced from each request's start** (`tiktok.Resolver.pace`, SimpCity `_pages`; limits still back off), dates
+written through `simpcity.ExifPool`, saves every 60 s — §7.4b-3. (`SimpCityService`,
   `SimpCityRecord`, `SimpCityHosts`, `SimpCityImportView`, `mac/simpcity.py`, `mac/filehosts.py`,
   `mac/simpcity_downloader.py`; `docs/feature-notes.md` §7.4d)
 - **Instagram / Facebook profiles in Photo Browser for Mac too** — right-click a folder ▸ Download Instagram/Facebook

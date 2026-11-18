@@ -81,7 +81,9 @@ HOSTS_READ = 1               # thread marker: its pages were read for file-host 
 # got "too many requests"). Pages are read `PAGE_GAP` seconds apart (plus a little jitter); a limited
 # answer means a wait from `LIMIT_WAITS`, the same page again, and twice the gap from then on (up to
 # `MAX_GAP`). When the waits run out, the run keeps what it has read and carries on from there next time.
-PAGE_GAP = 2.0
+PAGE_GAP = 1.2                       # (Nov 18: was 2 s + up to 1 s *after* each read; now from each read's start —
+                                     # the page's own load time counts — and eased back after `EASE_AFTER` clean pages)
+EASE_AFTER = 20
 MAX_GAP = 12.0
 LIMIT_WAITS = (30, 60, 120, 240, 300)
 
@@ -1391,6 +1393,40 @@ class ExifSession:
                 except (OSError, ValueError, subprocess.SubprocessError):
                     self._kill()
             self.proc = None
+
+
+class ExifPool:
+    """Several `ExifSession`s, each call on whichever is free — so the download lanes' dates and captions are
+    written side by side, not one file at a time through a single ExifTool (Nov 18: with four to eight lanes
+    finishing at once, the one session had become the queue). Same calls as one session (`run`, `close`,
+    `note`)."""
+
+    def __init__(self, path: str, size: int = 3, errors: bool = False) -> None:
+        import queue
+        self.path = path
+        self.sessions = [ExifSession(path, errors) for _ in range(max(1, size))]
+        self._free: "queue.Queue[ExifSession]" = queue.Queue()
+        for s in self.sessions:
+            self._free.put(s)
+
+    @property
+    def note(self) -> str:
+        return next((s.note for s in self.sessions if s.note), "")
+
+    @property
+    def broken(self) -> bool:
+        return all(s.broken for s in self.sessions)
+
+    def run(self, *args: str, timeout: float | None = None) -> str:
+        s = self._free.get()
+        try:
+            return s.run(*args, timeout=timeout)
+        finally:
+            self._free.put(s)
+
+    def close(self) -> None:
+        for s in self.sessions:
+            s.close()
 
 
 def _parse(s) -> datetime | None:

@@ -47,8 +47,10 @@ try:                                                    # the browser is only fo
 except ImportError:                                     # no Qt WebEngine: plain requests only
     QWebEngineView = None
 
-LANES = 4                     # files downloaded at once
-SAVE_EVERY = 20               # the record is saved (and the files tagged) after this many files
+LANES = 8                     # files downloaded at once (TikTok's own CDN serves them; was 4)
+SAVE_EVERY = 300              # the record is saved (and the files tagged) after this many files…
+SAVE_SECONDS = 60             # …or this long after the last save: each one writes the drive's whole tag table
+EXIF_SESSIONS = 3             # ExifTools writing dates and captions side by side (simpcity.ExifPool)
 CHECK_AFTER = 8.0             # seconds of no answer in the browser before it's shown (a check to answer)
 CHECK_LIMIT = 300.0           # …and how long the person has
 QUIET_LIMIT = 45.0            # a browser read that isn't a check gives up after this
@@ -265,8 +267,9 @@ class TikTokWindow(QMainWindow):
         known = tt.profile_of(self.dest, on_disk=False)
         self.already = (known.ids if known is not None else set()) | set(self.record.downloaded) | self.on_disk
         self._log(f"@{handle} → “{self._shown(self.dest)}” — {len(self.already)} video(s) already here")
-        self.exif = sc.ExifSession(self.exiftool) if self.exiftool else None
+        self.exif = sc.ExifPool(self.exiftool, EXIF_SESSIONS) if self.exiftool else None
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=LANES, thread_name_prefix="tiktok-dl")
+        self.last_save = time.monotonic()
         self.opts = social.Options()
         self.resolver = tt.Resolver(browser=self._browser if self.view is not None else None,
                                     stop=lambda: self.stopping)
@@ -330,13 +333,14 @@ class TikTokWindow(QMainWindow):
         self.bar.setValue(self.settled_n)
         self._say(f"Downloaded {len(self.written)} of {self.queued} found" +
                   (f" · {self.failed} failed" if self.failed else "") + ("" if self.listed else " · still looking…"))
-        if len(self.to_tag) >= SAVE_EVERY:
+        if len(self.to_tag) >= SAVE_EVERY or (self.to_tag and time.monotonic() - self.last_save >= SAVE_SECONDS):
             self._save()
         if self.listed and self.settled_n >= self.queued:
             self._finish()
 
     def _save(self, final: bool = False) -> tuple[int, int]:
         """The tags and the record, so far (the likes go in once the listing is done)."""
+        self.last_save = time.monotonic()
         if self.tags is not None and self.to_tag:
             try:
                 self.tags.add(self.to_tag, [tt.TAG])

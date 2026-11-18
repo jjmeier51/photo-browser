@@ -3,10 +3,12 @@ tiktok_downloader.py is the window, social.py downloads).
 
 **How a profile is read** — exactly as the iPhone does: through the public **tikwm.com** resolver (no login,
 no request signing; only the public handle is sent, nothing is uploaded). `user/posts` pages the profile's
-whole video list, 35 at a time, about one request a second (its free limit); each post carries its id, post
+whole video list, 35 at a time, about one request a second (its free limit — counted from each request's start,
+`Resolver.pace`); each post carries its id, post
 date, caption, like count (`digg_count`) and either a watermark-free HD video (`hdplay`), a standard one
 (`play`) or — for a slideshow — its `images`. A video the listing gives no HD address for is resolved one at
-a time through the single-video endpoint with `hd=1`. Requests go out as tikwm's own pages send them
+a time through the single-video endpoint with `hd=1` — a few between listing pages (`HD_BETWEEN`), so those
+downloads start while the listing goes on, the rest after it. Requests go out as tikwm's own pages send them
 (Referer, Origin, X-Requested-With); a throttled answer (`code != 0`) is retried with a growing pause and the
 two hosts taken in turn; a Cloudflare block page ends the plain requests and hands the call to a real
 browser (`Resolver.browser` — the window's Chromium, where the person can answer a check), whose clearance
@@ -64,7 +66,9 @@ API_HOSTS = ["https://www.tikwm.com", "https://tikwm.com"]
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
       "Version/17.0 Safari/605.1.15")
 PAGE = 35                           # posts a page (what the iPhone asks for)
-GAP = 1.1                           # seconds between resolver calls (its free limit is about one a second)
+GAP = 1.05                          # seconds from one resolver call's start to the next's (its free limit is
+                                    # about one a second) — the answer's own time counts towards it (`pace`)
+HD_BETWEEN = 3                      # HD links looked up between two listing pages, so their downloads start early
 MAX_PAGES = 400                     # a safety cap: 14,000 posts
 BACKUP_DIR = ".Photo Browser Metadata"
 BACKUP_JSON = "metadata.json"
@@ -439,6 +443,17 @@ class Resolver:
         self.agent = ""                 # …and the User-Agent it was issued to (they only work together)
         self.blocked_with_clearance = 0
         self.waiting_for_person = False
+        self._last = 0.0                # when the last request went out (`pace`)
+        self.clock = time.monotonic
+
+    def pace(self) -> None:
+        """Waits until `GAP` seconds after the last request *started*: the resolver's own answer time counts
+        towards the gap, where a fixed pause after each answer added it to every request (Nov 18 — about twice
+        as fast on a slow resolver, and still one request a second)."""
+        wait = GAP - (self.clock() - self._last)
+        if self._last and wait > 0:
+            self.sleep(wait)
+        self._last = self.clock()
 
     def headers(self, host: str) -> dict[str, str]:
         h = {"User-Agent": self.agent or UA, "Accept": "application/json, text/plain, */*",
@@ -470,6 +485,7 @@ class Resolver:
                     return None, "stopped"
                 if attempt:
                     self.sleep(min(attempt, 4))
+                self.pace()
                 host = API_HOSTS[attempt % len(API_HOSTS)]
                 status, body = self.get(self.url(path, query, host), self.headers(host))
                 if status == 0:
@@ -541,9 +557,11 @@ def parse_post(v: dict) -> Post | None:
 
 
 def list_posts(resolver: Resolver, username: str, progress: Callable[[str], None] = lambda s: None,
-               on_post: Callable[[Post], None] = lambda p: None) -> Listing:
+               on_post: Callable[[Post], None] = lambda p: None,
+               between: Callable[[], None] = lambda: None) -> Listing:
     """Every post on `@username`, newest first, `on_post` called as each is listed. The whole profile is paged
-    every time (so every like count is read again) — the iPhone's early stop isn't taken here."""
+    every time (so every like count is read again) — the iPhone's early stop isn't taken here. `between()` runs
+    after each page (the run looks up a few HD links there)."""
     out = Listing()
     seen: set[str] = set()
     cursor = "0"
@@ -551,8 +569,6 @@ def list_posts(resolver: Resolver, username: str, progress: Callable[[str], None
         if resolver.stop():
             out.reason = "stopped"
             break
-        if page:
-            resolver.sleep(GAP)
         d, why = resolver.api("/api/user/posts", {"unique_id": username, "count": str(PAGE), "cursor": cursor, "hd": "1"})
         if d is None:
             out.reason = why
@@ -581,6 +597,7 @@ def list_posts(resolver: Resolver, username: str, progress: Callable[[str], None
             out.complete = True
             break
         cursor = nxt
+        between()
     return out
 
 
@@ -617,6 +634,7 @@ def run(resolver: Resolver, username: str, folder: Path, already: set[str],
     was found, with every listed post's likes."""
     out = Outcome(username)
     waiting: list[Post] = []
+    resolved = [0]                                   # how many of `waiting` are done
 
     def missing(items: list[social.Item]) -> list[social.Item]:
         return [i for i in items if not os.path.lexists(i.folder / i.filename)]
@@ -634,8 +652,25 @@ def run(resolver: Resolver, username: str, folder: Path, already: set[str],
         else:
             waiting.append(p)
 
+    def resolve_next() -> None:
+        p = waiting[resolved[0]]
+        resolved[0] += 1
+        best = resolver.hd(p.id, username) or p.sd
+        if best:
+            items = missing(items_for(p, best, folder, username))
+            if items:
+                out.queued += len(items)
+                emit(items)
+
+    def between() -> None:
+        """A few HD links between listing pages: those videos download while the listing goes on."""
+        for _ in range(HD_BETWEEN):
+            if resolved[0] >= len(waiting) or resolver.stop():
+                return
+            resolve_next()
+
     progress(f"Finding @{username}'s videos…")
-    listing = list_posts(resolver, username, progress, on_post)
+    listing = list_posts(resolver, username, progress, on_post, between)
     out.author_id, out.nickname, out.avatar = listing.author_id, listing.nickname, listing.avatar
     out.total, out.complete, out.newest, out.failed = len(listing.posts), listing.complete, listing.newest, listing.failed
     if listing.failed:
@@ -644,19 +679,11 @@ def run(resolver: Resolver, username: str, folder: Path, already: set[str],
         return out
     if not listing.complete and listing.reason and listing.reason != "stopped":
         out.note = f"The list stopped early ({listing.reason}) — run it again to get the rest."
-    for i, p in enumerate(waiting):
+    while resolved[0] < len(waiting):
         if resolver.stop():
             break
-        progress(f"Preparing HD links — {i + 1} of {len(waiting)}…")
-        if i:
-            resolver.sleep(GAP)
-        best = resolver.hd(p.id, username) or p.sd
-        if not best:
-            continue
-        items = missing(items_for(p, best, folder, username))
-        if items:
-            out.queued += len(items)
-            emit(items)
+        progress(f"Preparing HD links — {resolved[0] + 1} of {len(waiting)}…")
+        resolve_next()
     if not out.queued and out.note is None:
         if not listing.posts:
             out.note = ("Couldn't find any videos — the handle may be wrong, the profile private or empty, or "

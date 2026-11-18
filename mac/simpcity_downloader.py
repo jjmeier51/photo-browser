@@ -63,7 +63,10 @@ from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 import filehosts as fh  # noqa: E402
 import simpcity as sc  # noqa: E402
 
-LANES = 6                 # files resolved + downloaded at once
+LANES = 8                 # files resolved + downloaded at once (was 6)
+SAVE_EVERY = 300          # the record is saved and the new files tagged after this many files…
+SAVE_SECONDS = 60         # …or this long after the last save (each save writes the record and the drive's tag table)
+EXIF_SESSIONS = 3         # ExifTools writing dates side by side (simpcity.ExifPool)
 SCORE_SAVE = 20           # Get Reaction Scores: the record is saved every this many pages
 HOME = "https://simpcity.cr/"
 LOGIN = "https://simpcity.cr/login/"
@@ -305,6 +308,7 @@ class SimpCityWindow(QMainWindow):
         self.bar.setRange(0, 0)
         self.written: list[str] = []
         self.untagged: list[str] = []
+        self.last_save = time.monotonic()
         self.upscaled: list[str] = []          # tagged "upscaled" too, like the app's own upscales
         self.renamed: list[tuple[str, str]] = []
         self.failed = self.processed = 0
@@ -327,7 +331,7 @@ class SimpCityWindow(QMainWindow):
         self.person_left = 0                            # … and how many of them were left for next time
         self.person_wait: dict | None = None            # the one the window waits on
         self.gofile_stopped = ""                        # why gofile is left alone for the rest of the run
-        self.exif = sc.ExifSession(self.exiftool) if self.exiftool else None
+        self.exif = sc.ExifPool(self.exiftool, EXIF_SESSIONS) if self.exiftool else None
         _Runner(self, self._crawl(base, self.full.isChecked()), self._crawled).start()
 
     # -- Get Reaction Scores
@@ -447,11 +451,17 @@ class SimpCityWindow(QMainWindow):
         read_to = first - 1                                # the last page read
         asked_login = False
         gap, limits, short = sc.PAGE_GAP, 0, ""
+        began, clean = 0.0, 0                              # when the last read started; reads since a limit
         while n <= last and not self.stopping:
             if n > first or limits:
-                yield ("sleep", gap + random.uniform(0, 1))  # not back to back: SimpCity limits that
+                # not back to back (SimpCity limits that): `gap` from the last read's *start*, so the page's own
+                # load time counts towards it
+                wait = gap + random.uniform(0, gap / 2) - (time.monotonic() - began)
+                if wait > 0:
+                    yield ("sleep", wait)
                 if self.stopping:
                     break
+            began = time.monotonic()
             self._say(f"Reading page {n}{f' of {last}' if last > n else ''}… {progress()}")
             page = yield ("read", sc.page_url(base, n), n)
             if page and page.get("limited"):
@@ -460,7 +470,7 @@ class SimpCityWindow(QMainWindow):
                     short = f"SimpCity kept saying too many requests at page {n}"
                     break
                 wait = sc.LIMIT_WAITS[limits - 1]
-                gap = min(gap * 2, sc.MAX_GAP)
+                gap, clean = min(gap * 2, sc.MAX_GAP), 0
                 self._log(f"SimpCity is limiting how fast pages are read (page {n}) — waiting {wait} s, then reading a page "
                           f"every {gap:.0f} s or so.")
                 self._say(f"SimpCity says too many requests — waiting {wait} s before page {n} (pages read so far: "
@@ -471,6 +481,9 @@ class SimpCityWindow(QMainWindow):
                 short = f"page {n} couldn't be read: {sc.describe_page(self.last_page)}"
                 break
             limits = 0
+            clean += 1
+            if clean >= sc.EASE_AFTER and gap > sc.PAGE_GAP:  # a limit long behind: back towards the usual pace
+                gap, clean = max(sc.PAGE_GAP, gap * 0.75), 0
             found = sum(1 for p in page.get("posts") or [] for u in p.get("urls") or [] if sc.is_link(str(u)))
             if n == first and not found and not page.get("loggedIn") and not asked_login:
                 asked_login = True
@@ -814,7 +827,7 @@ class SimpCityWindow(QMainWindow):
             self.untagged.append(str(final))
             if upscaled:
                 self.upscaled.append(str(final))
-            if len(self.written) % 20 == 0:
+            if len(self.untagged) >= SAVE_EVERY or time.monotonic() - getattr(self, "last_save", 0.0) >= SAVE_SECONDS:
                 self._save_and_tag()
 
     def _person(self):
@@ -1024,8 +1037,10 @@ class SimpCityWindow(QMainWindow):
             return e
 
     def _save_and_tag(self) -> None:
-        """The record and the new files' tag, every 20 files and at the end (on the GUI thread: the
-        record is only ever touched here)."""
+        """The record and the new files' tags — every `SAVE_SECONDS` / `SAVE_EVERY` files and at the end (on the GUI
+        thread: the record is only ever touched here). One tag write for both tags (`TagStore.add_each`): every
+        20 files, two whole-table writes had the window stop again and again on a big drive."""
+        self.last_save = time.monotonic()
         try:
             self.record.save()
         except OSError as e:
@@ -1037,12 +1052,12 @@ class SimpCityWindow(QMainWindow):
                 self.tags.carry(self.renamed)
                 self.tags.forget([old for old, _new in self.renamed])
                 self.renamed = []
-            if self.untagged:
-                self.tags.add(self.untagged, [sc.TAG])
-                self.untagged = []
-            if self.upscaled:
-                self.tags.add(self.upscaled, [sc.UPSCALED_TAG])
-                self.upscaled = []
+            if self.untagged or self.upscaled:
+                wanted: dict[str, list[str]] = {p: [sc.TAG] for p in self.untagged}
+                for p in self.upscaled:
+                    wanted.setdefault(p, []).append(sc.UPSCALED_TAG)
+                self.tags.add_each(wanted)
+                self.untagged, self.upscaled = [], []
         except OSError as e:
             self._log(f"Couldn't tag the files: {e}")
 
@@ -1151,11 +1166,12 @@ class SimpCityWindow(QMainWindow):
             until = time.monotonic() + float(req[1])
 
             def tick(cb=cb) -> None:
-                if self.stopping or time.monotonic() >= until:
+                left = until - time.monotonic()
+                if self.stopping or left <= 0:
                     cb(None)
                 else:
-                    QTimer.singleShot(500, tick)
-            QTimer.singleShot(500, tick)
+                    QTimer.singleShot(int(min(500, left * 1000)) + 1, tick)
+            QTimer.singleShot(int(min(500, max(0.0, until - time.monotonic()) * 1000)) + 1, tick)
         elif kind == "thread":
             fn = req[1]
             label = req[2] if len(req) > 2 else ""

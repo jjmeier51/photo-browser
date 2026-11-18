@@ -3727,6 +3727,39 @@ export is done all of the thumbnails are ready to be viewed."
   (no Mac here) — its frames are HEIC at 1.5×, slower to shrink than the test's JPEGs, which is what the countdown
   is for.
 
+#### 7.4b-3 / 7.4d-2 TikTok and SimpCity, faster (Nov 18, 2026)
+
+"Speed up the TikTok downloader for Mac. It takes way too long. Also speed up the SimpCity downloader."
+Where the time went, and what changed:
+- **Pauses counted from the wrong moment** (both). tikwm requests were 1.1 s apart *after each answer* and
+  SimpCity's pages 2 s + up to 1 s after each read, so the server's own time was added to every gap. Now the gap
+  runs from the previous request's **start** — `tiktok.Resolver.pace` (`GAP` 1.05 s: still one request a second, the
+  free limit) and `_pages` (`PAGE_GAP` 1.2 s + up to half that again, from the read's start). A resolver answering in
+  0.6 s: 24 requests in 25 s instead of ~40; SimpCity pages that take 1.5 s to show: read ~1.6 s apart instead of
+  3.5–4.5. SimpCity's "too many requests" handling is unchanged (wait `LIMIT_WAITS`, double the gap), and the gap
+  now eases back (×0.75) after `EASE_AFTER` (20) clean pages instead of staying doubled for the rest of the thread.
+- **TikTok's HD lookups waited for the whole listing.** A video the listing gives no HD address for is looked up
+  alone; those all came after the last page, so their downloads started late. Now `HD_BETWEEN` (3) are looked up
+  between listing pages (`list_posts(between=…)`) — the first such video was handed to the downloads after 1.7 s
+  in the test instead of after the listing — and the rest after.
+- **More at once**: TikTok 4 → 8 download lanes; SimpCity 6 → 8 lanes (hidden pages).
+- **One ExifTool was the queue** (both): every finished file's date/caption went through one kept-open ExifTool,
+  one file at a time — and a video's write rewrites the file. `simpcity.ExifPool` (3 sessions, any free one;
+  same calls as `ExifSession`) is used by both windows.
+- **Saves** (both): every 20 files the window wrote the record and the drive's whole tag table (SimpCity twice, once
+  per tag) on its own thread. Now every `SAVE_SECONDS` (60) or `SAVE_EVERY` (300) files, SimpCity's two tags in one
+  `TagStore.add_each`.
+- The window's `sleep` request now wakes when the time is up, not on the next half-second tick.
+Not changed: SimpCity still reads the thread's pages before downloading (the record works out what's new from the
+whole read; a thread read before starts from the page it reached, so later runs read little).
+
+Tested here: the TikTok unit tests and the end-to-end run against the mock tikwm (86 files, record, likes, tags; a
+second run "No new videos"); the pacing with a 0.6 s resolver; SimpCity's `_pages` driven with simulated 1.5 s reads
+and a "too many requests" (gap doubled, eased back after 20 pages; 40 pages in 130 s instead of ~188); the ExifTool
+pool with the real ExifTool (each photo its own date); the combined tag save; both windows opening. **Not run
+against tikwm.com or simpcity.cr** — if SimpCity now says "too many requests" more often, the gap backs off by
+itself; `PAGE_GAP` is the one number to raise.
+
 #### 7.4h-3 The first real hub run (Nov 17, evening)
 
 A run on a subscribed creator's profile found the hub — Facebook names the tab **"Supporters"**
