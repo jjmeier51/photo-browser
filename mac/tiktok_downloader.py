@@ -192,6 +192,9 @@ class TikTokWindow(QMainWindow):
                 return
             waited = time.monotonic() - started
             if waited > (CHECK_LIMIT if holder["shown"] else QUIET_LIMIT + CHECK_AFTER):
+                said = " ".join((holder.get("text") or "").split())[:160]
+                self._log("   gave up waiting for tikwm.com's answer" + (f" — the page said: “{said}”" if said
+                                                                        else " — the page stayed blank"))
                 self._browse_end(holder, done, None)
                 return
 
@@ -207,9 +210,12 @@ class TikTokWindow(QMainWindow):
                 if isinstance(obj, dict):
                     self._browse_end(holder, done, obj)
                     return
-                looks_checked = isinstance(text, str) and any(w in text.lower() for w in (
-                    "verify", "human", "checking", "just a moment", "cloudflare", "captcha"))
-                if not holder["shown"] and (waited > CHECK_AFTER and looks_checked):
+                holder["text"] = text if isinstance(text, str) else ""
+                # Whatever the page is by now — Cloudflare's check ("Performing security verification", "Verify you
+                # are human", a box with no words), an error — it isn't the answer, so the person is shown it to
+                # answer themselves. (Only pages with certain words were shown before; Cloudflare's newer wording
+                # matched none, and the run gave up in silence after a minute — Nov 18.)
+                if not holder["shown"] and waited > CHECK_AFTER:
                     holder["shown"] = True
                     self.resolver.waiting_for_person = True
                     self.view.setVisible(True)

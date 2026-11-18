@@ -3760,6 +3760,18 @@ pool with the real ExifTool (each photo its own date); the combined tag save; bo
 against tikwm.com or simpcity.cr** — if SimpCity now says "too many requests" more often, the gap backs off by
 itself; `PAGE_GAP` is the one number to raise.
 
+#### 7.4b-4 tikwm's check, shown whatever it says (Nov 18, 2026)
+
+A real run: plain requests to tikwm.com answered with Cloudflare's check (then HTTP 403), the request went to the
+window's browser — and the run either ended with "tikwm.com is asking for a quick check" or gave up after ~53 s
+without ever showing the page. The window showed its browser only when the page's text held one of a few words
+("verify", "human", "checking", "just a moment"…); Cloudflare's newer page ("Performing security verification", or
+a box with no words) matched none, so the person never saw it. Now **any page that isn't tikwm's JSON answer after
+`CHECK_AFTER` (8 s) is shown** for the person to answer, and when a read gives up the log says what the page said.
+**Not done, on purpose:** changing the browser's User-Agent to hide that it's Qt WebEngine (the permission check
+refused it as disguising the client to get past bot detection). If tikwm's check can't be passed in the window
+itself, the iPhone app's TikTok download is the other way in.
+
 #### 7.4e-2 Instagram and Facebook, faster without pushing Meta (Nov 18, 2026)
 
 "Speed up the Instagram and Facebook downloaders for Mac too, without getting rate limited by Meta." The rule kept:
