@@ -3705,6 +3705,28 @@ subscribed account; if it still finds nothing, the saved `facebook-hub-*.json` h
   (least recently used out, under the limit nothing); the Caches folder moved to Application Support; the window
   storing a cover.
 
+#### 6aq-2 Export All Frames makes the thumbnails as it goes (Nov 18, 2026)
+
+"When exporting all frames, ensure that the thumbnails are cached as the frames are being exported, so once the
+export is done all of the thumbnails are ready to be viewed."
+- `frame_export.export_all(..., on_frames=)`: while the export runs, every `WATCH_EVERY` (1.5 s) the folder is
+  looked at for frames that are written — `ready_frames`: named "<folder> <i>" with i at least four behind the
+  count (the helper encodes two while it reads the next), left alone for `SETTLED` (2 s; a frame written straight
+  to its name on exFAT or by ffmpeg may still be growing), never a `.part` or an empty file — and the rest at the
+  end, each frame once, in order. The helper never changes a frame's dates after writing it, so its cache key holds.
+- `FramesWindow(warm=, warm_left=)` hands them (through its bridge, on the window's thread) to
+  `Thumbnails.warm(paths)`: the very `_ThumbJob` the views use, so key and picture are identical, in a pool of its
+  own with two threads (beside the export, never ahead of the views), `WARM` jobs never skipped by a listing change
+  nor treated as on-screen by the frame helper; written to the disk cache only — memory keeps what's on screen —
+  unless a tile asks meanwhile (`_wanted`), and a tile asking for one still waiting takes it back (`tryTake`) into
+  the views' pool. After the export the window counts down "Making thumbnails — N to go…", then "Thumbnails ready."
+- Tested here: which frames count as written (behind the count, settled, no `.part`/empty, once each, in order); a
+  real ffmpeg export handing frames over during the run (16 batches for 900 frames) and all at the end; the warm
+  queue putting every thumbnail on disk under the views' key without filling memory, a tile then served from disk
+  in ~10 ms; the window end to end (360 frames → 360 thumbnails, "Thumbnails ready."). Not run with the Swift helper
+  (no Mac here) — its frames are HEIC at 1.5×, slower to shrink than the test's JPEGs, which is what the countdown
+  is for.
+
 #### 7.4h-3 The first real hub run (Nov 17, evening)
 
 A run on a subscribed creator's profile found the hub — Facebook names the tab **"Supporters"**

@@ -181,6 +181,8 @@ actions the app makes no network calls.
   Caches** — macOS empties that when space runs low), kept under 20 GB by `prune_thumbs` (least recently used first,
   daily); folder covers found by scanning and video lengths in `facts.sqlite` (`mac/facts_store.py`, `_Facts(kind=…)`)
   — every key carries a modified time, a cover is re-checked when handed out, "nothing found" is never kept.
+  **Export All Frames warms the cache as it goes** (`export_all(on_frames=)` → `Thumbnails.warm`, own 2-thread pool,
+  disk only; the window says "Thumbnails ready.") — §6aq-2.
   Photo Browser for Mac's **true grid**: the Photo Grid (⌘3) and icon view at minimum spacing (`Pane.tight()`, View ▸ Tight
   Icons) fill the width in whole columns with pictures cropped square — `picture_px()` is a tile's picture side (not
   `icon_px`); the grid keeps its scroll-bar strip there (a `QListView` lays out a bar's width short otherwise).

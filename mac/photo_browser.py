@@ -1153,6 +1153,7 @@ def ask_inside(parent: QWidget | None, folders: list[str], inside: int, question
 
 
 THUMB_PX = 512          # one master thumbnail per file; icons of every size are drawn from it
+WARM = -1               # a thumbnail made ahead for the disk cache (Thumbnails.warm): never skipped, never urgent
 _QL_BATCH = 4           # files per qlmanage run: few, so results come in as they're made, not all at the end
 
 
@@ -1469,7 +1470,7 @@ class _FrameRunner:
             return self._now.pop()
         while self._later:
             key, path, gen, at = self._later[0]
-            if gen != self.owner.generation:
+            if gen != WARM and gen != self.owner.generation:
                 self._later.popleft()
                 self.signals.skipped.emit(key)                     # a listing that's been left
                 continue
@@ -1598,7 +1599,7 @@ class _ThumbJob(QRunnable):
         self.setAutoDelete(True)
 
     def run(self) -> None:
-        if self.gen is not None and self.gen != self.owner.generation:
+        if self.gen is not None and self.gen != WARM and self.gen != self.owner.generation:
             self.signals.skipped.emit(self.key)
             return
         img = QImage()
@@ -1667,6 +1668,12 @@ class Thumbnails(QObject):
         self.generation = 0
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(max(4, min(8, os.cpu_count() or 4)))
+        self._warm_pool = QThreadPool(self)            # thumbnails made ahead (warm): two at a time, beside the
+        self._warm_pool.setMaxThreadCount(2)           # export that's making the files, never in the way of the views
+        self._warm: set[str] = set()                   # keys being made ahead…
+        self._warm_jobs: dict[str, _ThumbJob] = {}     # …their jobs, while waiting (a tile's ask moves one up)
+        self._wanted: set[str] = set()                 # …that a tile on screen has asked for meanwhile
+        self.warmed = 0                                # thumbnails made ahead this session
         self._signals = _ThumbSignals()
         self._signals.done.connect(self._done, Qt.ConnectionType.QueuedConnection)
         self._signals.skipped.connect(self._pending.discard, Qt.ConnectionType.QueuedConnection)
@@ -1696,8 +1703,39 @@ class Thumbnails(QObject):
         """The pane moved on: prefetches still queued for the old listing are skipped as they come up."""
         self.generation += 1
 
+    def warm(self, paths: list[str]) -> int:
+        """Thumbnails made ahead, into the disk cache, for files that will be looked at soon — Export All Frames
+        hands over each frame as it's written, so the folder opens with every thumbnail ready. Low priority, two at
+        a time; one already on disk or under way is left. Kept in memory only if a tile asks for it meanwhile.
+        Returns how many were queued."""
+        queued = 0
+        for path in paths:
+            try:
+                key = thumb_key(path, os.stat(path).st_mtime)
+            except OSError:
+                continue
+            if key in self._cache or key in self._pending or thumb_file(key).is_file():
+                continue
+            self._pending.add(key)
+            self._warm.add(key)
+            job = _ThumbJob(key, path, self._signals, self._ql, self, WARM, self._frames)
+            job.setAutoDelete(False)                   # kept so a tile's ask can take it back (tryTake)
+            self._warm_jobs[key] = job
+            self._warm_pool.start(job, 0)
+            queued += 1
+        return queued
+
+    def warm_left(self) -> int:
+        """Thumbnails being made ahead that aren't ready yet."""
+        return len(self._warm)
+
     def _request(self, key: str, path: str, gen: int | None, priority: int) -> None:
         if key in self._pending:
+            if key in self._warm:
+                self._wanted.add(key)                  # a tile is waiting for one being made ahead: it's kept…
+                job = self._warm_jobs.get(key)
+                if gen is None and job is not None and self._warm_pool.tryTake(job):
+                    self._pool.start(job, priority)    # …and, not started yet, it's made now with the views' own
             if gen is None and self._frames is not None:
                 self._frames.promote(key)                  # on screen now: ahead of the prefetches
             return
@@ -1706,6 +1744,13 @@ class Thumbnails(QObject):
 
     def _done(self, key: str, img: QImage) -> None:
         self._pending.discard(key)
+        if key in self._warm:
+            self._warm.discard(key)
+            self._warm_jobs.pop(key, None)
+            self.warmed += 1
+            if key not in self._wanted:                # made for the disk only: memory keeps what's on screen
+                return
+            self._wanted.discard(key)
         pm = None if img.isNull() else QPixmap.fromImage(img)
         self._cache[key] = pm
         self._bytes += self._size(pm)
@@ -5985,7 +6030,9 @@ class Pane(QWidget):
         """Export All Frames… (frame_export.py — the iPhone's): one video or several, each into a folder
         beside it."""
         import frame_export
-        win = frame_export.FramesWindow(videos, self.window(), on_done=lambda _folders: self.refresh_results())
+        win = frame_export.FramesWindow(videos, self.window(), on_done=lambda _folders: self.refresh_results(),
+                                        warm=THUMBS.warm if THUMBS is not None else None,
+                                        warm_left=THUMBS.warm_left if THUMBS is not None else None)
         _VIEWERS.append(win)
         win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
         win.show()

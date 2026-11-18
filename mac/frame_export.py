@@ -17,6 +17,10 @@ same video at the same rate and colour again resumes into that folder; anything 
 different rate) goes into a fresh "<name> 2", so two exports never mix in one folder. Several videos at once:
 each into its own folder, one after another.
 
+**Thumbnails as it goes** (Nov 18): the frames written are handed to the app's thumbnail cache while the export
+runs (`ready_frames` → `FramesWindow(warm=…)` → `Thumbnails.warm`), so when it's done the folder opens with every
+thumbnail already made.
+
 Both are `video_helper.swift` (`frame`, `frames` — the iPhone's AVFoundation and Core Image code). Without it
 (no Xcode Command Line Tools, or it didn't build) ffmpeg does them: the frame as PNG and the frames as JPEG —
 always standard range (a JPEG can't hold HDR), tone-mapped with `zscale`/`tonemap` when this ffmpeg has them.
@@ -261,17 +265,72 @@ def _resume_index(folder: Path, base: str) -> int:
     return max(0, i - 2)
 
 
+SETTLED = 2.0          # seconds a frame file must have been left alone before it counts as written (direct writes)
+WATCH_EVERY = 1.5      # how often, at most, the folder is looked at for frames done while the export runs
+
+
+def ready_frames(folder: Path, base: str, upto: int | None, seen: set[str], now: float | None = None) -> list[str]:
+    """Frames in `folder` that are written and weren't handed on yet (`seen` gets them): named "<base> <i>" with
+    i ≤ `upto` (None: any — the export is over), and left alone for `SETTLED` seconds — a frame written straight to
+    its name (an exFAT drive, ffmpeg) may still be growing. In name order, so thumbnails are made as they'll show."""
+    now = time.time() if now is None else now
+    rx = re.compile(re.escape(base) + r" (\d+)\.(?:heic|jpg)$")
+    found: list[tuple[int, str]] = []
+    try:
+        with os.scandir(folder) as it:
+            for e in it:
+                m = rx.match(e.name)
+                if not m or e.path in seen:
+                    continue
+                i = int(m.group(1))
+                if upto is not None and i > upto:
+                    continue
+                try:
+                    st = e.stat()
+                except OSError:
+                    continue
+                if st.st_size <= 0 or (upto is not None and now - st.st_mtime < SETTLED):
+                    continue
+                found.append((i, e.path))
+    except OSError:
+        return []
+    found.sort()
+    out = [path for _i, path in found]
+    seen.update(out)
+    return out
+
+
 def export_all(video: str, folder_name: str = "", every: int = 1, standard_range: bool = True,
-               progress: Callable[[int, int], None] | None = None, stop: threading.Event | None = None
-               ) -> tuple[str | None, int, str]:
+               progress: Callable[[int, int], None] | None = None, stop: threading.Event | None = None,
+               on_frames: Callable[[list[str]], None] | None = None) -> tuple[str | None, int, str]:
     """Every `every`-th frame of `video` into a folder beside it (module notes). Returns (folder, frames now in
-    it, why — "" unless nothing could be done). `progress(i, total)` is called from this (worker) thread."""
+    it, why — "" unless nothing could be done). `progress(i, total)` is called from this (worker) thread.
+
+    `on_frames(paths)` — the frames written so far, a batch at a time while the export runs (`ready_frames`, every
+    `WATCH_EVERY` s, the ones the export has moved past) and the rest at the end, in order: the window hands them to
+    the thumbnail cache, so the folder's thumbnails are ready when the export is (Nov 18). Frames already there
+    from a stopped export are included."""
     wanted = (folder_name or "").strip() or default_name(video)
     info = media_info.video_info(video)
     native = float(info.get("fps") or 0)
     fps = 0.0 if every <= 1 else (native / every if native else 30.0 / every)
     folder, start = frames_folder(Path(video).parent, wanted, video, every, standard_range)
     name = folder.name                                   # frames are named by their folder, as on the iPhone
+    if on_frames is not None:
+        seen: set[str] = set()
+        watched = [0.0]
+        user_progress = progress
+
+        def progress(i: int, total: int) -> None:       # noqa: F811 — the caller's, plus the frames done so far
+            if user_progress:
+                user_progress(i, total)
+            now = time.monotonic()
+            if now - watched[0] >= WATCH_EVERY:
+                watched[0] = now
+                # two frames are encoded while the next is read: the ones well behind the count are written
+                done = ready_frames(folder, name, i - 4, seen)
+                if done:
+                    on_frames(done)
     try:
         sc.write_file(folder / NOTE, json.dumps(_note_for(video, every, standard_range)).encode())
     except OSError:
@@ -292,6 +351,10 @@ def export_all(video: str, folder_name: str = "", every: int = 1, standard_range
         except OSError:
             pass
     count = _frames_in(folder, name)
+    if on_frames is not None and count:
+        rest = ready_frames(folder, name, None, seen)
+        if rest:
+            on_frames(rest)
     if count == 0:
         try:
             os.remove(folder / NOTE)
@@ -385,8 +448,11 @@ def _qt():
     return locals()
 
 
-def FramesWindow(videos: list[str], parent=None, on_done: Callable[[list[str]], None] | None = None):
-    """The Export All Frames window for one video or several (module notes)."""
+def FramesWindow(videos: list[str], parent=None, on_done: Callable[[list[str]], None] | None = None,
+                 warm: Callable[[list[str]], None] | None = None, warm_left: Callable[[], int] | None = None):
+    """The Export All Frames window for one video or several (module notes). `warm(paths)` (on the window's
+    thread): frames as they're written, for the thumbnail cache (photo_browser's `Thumbnails.warm`); `warm_left()`:
+    how many of those thumbnails are still being made — the window says when they're all ready."""
     q = _qt()
     QWidget, QVBoxLayout, QHBoxLayout, QLabel = q["QWidget"], q["QVBoxLayout"], q["QHBoxLayout"], q["QLabel"]
     QLineEdit, QRadioButton, QButtonGroup, QPushButton = q["QLineEdit"], q["QRadioButton"], q["QButtonGroup"], q["QPushButton"]
@@ -395,6 +461,7 @@ def FramesWindow(videos: list[str], parent=None, on_done: Callable[[list[str]], 
 
     class Bridge(QObject):
         moved = Signal(int, int, int)             # video index, frame, total
+        made = Signal(list)                       # frames written — for the thumbnail cache
         finished = Signal(int, str, int, str)     # video index, folder, count, why
         all_done = Signal()
 
@@ -411,6 +478,8 @@ def FramesWindow(videos: list[str], parent=None, on_done: Callable[[list[str]], 
             self.bridge.moved.connect(self._moved)
             self.bridge.finished.connect(self._finished)
             self.bridge.all_done.connect(self._all_done)
+            if warm is not None:
+                self.bridge.made.connect(warm)
             self.setWindowTitle("Export All Frames" + (f" — {len(videos)} videos" if len(videos) > 1 else ""))
             self.resize(560, 470 if len(videos) > 1 else 360)
             v = QVBoxLayout(self)
@@ -520,7 +589,8 @@ def FramesWindow(videos: list[str], parent=None, on_done: Callable[[list[str]], 
                     if self.stop.is_set():
                         break
                     folder, count, why = export_all(p, name if len(self.videos) == 1 else "", every, sdr,
-                                                    lambda a, b, i=i: self.bridge.moved.emit(i, a, b), self.stop)
+                                                    lambda a, b, i=i: self.bridge.moved.emit(i, a, b), self.stop,
+                                                    on_frames=(self.bridge.made.emit if warm is not None else None))
                     self.bridge.finished.emit(i, folder or "", count, why)
                 self.bridge.all_done.emit()
             threading.Thread(target=work, daemon=True).start()
@@ -561,6 +631,22 @@ def FramesWindow(videos: list[str], parent=None, on_done: Callable[[list[str]], 
             self.go.setEnabled(True)
             if on_done is not None and self.folders:
                 on_done(list(self.folders))
+            if warm_left is not None and self.folders:
+                self._said = self.status.text()
+                self._thumbs_tick()
+
+        def _thumbs_tick(self) -> None:
+            """After the export: the thumbnails still being made, until they're all there."""
+            from PySide6.QtCore import QTimer
+            if self.running:
+                return
+            left = warm_left()
+            base = self._said.rstrip()
+            if left > 0:
+                self.status.setText(f"{base} Making thumbnails — {left:,} to go…")
+                QTimer.singleShot(500, self, self._thumbs_tick)     # (with the window as context: closing it ends this)
+            else:
+                self.status.setText(f"{base} Thumbnails ready.")
 
         def _cancel(self) -> None:
             if self.running:

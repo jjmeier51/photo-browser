@@ -395,6 +395,9 @@ which macOS empties when your disk runs low — the ones you had come along), up
 first once a day if it grows past that. Which picture each folder shows, and how long each video is, are remembered
 too (`facts.sqlite` in the same folder), so folders don't have to be looked through again every time the app opens.
 
+Export All Frames makes each frame's thumbnail while the export is still running, so the frames folder opens with
+every thumbnail ready; the window says "Thumbnails ready." when the last one is made.
+
 ### More themes, Christmas wallpapers and typefaces
 
 View ▸ Theme… now has 70 looks: new everyday ones (Slate, Espresso, Nordic, Charcoal and Gold, Lavender Mist, Mint,
