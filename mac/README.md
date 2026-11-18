@@ -388,6 +388,13 @@ HDR photos (a standard picture plus a gain map) show their standard picture, as 
 does the same for what it makes. Thumbnails of HEIC / HEIF / AVIF / JPEG XL photos made before this are
 made again, once, the first time each folder is shown.
 
+### Thumbnails and folder covers are kept between launches
+
+Thumbnails are kept in `~/Library/Application Support/Photo Browser for Mac/Thumbnails` (moved there from Caches,
+which macOS empties when your disk runs low — the ones you had come along), up to 20 GB; the least recently used go
+first once a day if it grows past that. Which picture each folder shows, and how long each video is, are remembered
+too (`facts.sqlite` in the same folder), so folders don't have to be looked through again every time the app opens.
+
 ### More themes, Christmas wallpapers and typefaces
 
 View ▸ Theme… now has 70 looks: new everyday ones (Slate, Espresso, Nordic, Charcoal and Gold, Lavender Mist, Mint,

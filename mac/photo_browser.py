@@ -1156,15 +1156,93 @@ THUMB_PX = 512          # one master thumbnail per file; icons of every size are
 _QL_BATCH = 4           # files per qlmanage run: few, so results come in as they're made, not all at the end
 
 
+_THUMB_DIR: Path | None = None
+
+
 def thumb_cache_dir() -> Path:
-    """Where thumbnails persist between launches: ~/Library/Caches on a Mac (the system may clear it
-    under pressure — nothing is lost but a re-render). PHOTO_BROWSER_THUMB_CACHE overrides it (tests)."""
-    env = os.environ.get("PHOTO_BROWSER_THUMB_CACHE")
-    if env:
-        return Path(env)
-    if IS_MAC:
-        return app_identity.thumb_cache()
-    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "PhotoBrowser" / "MacThumbs"
+    """Where thumbnails persist between launches: Application Support on a Mac (app_identity.thumb_cache — not
+    Caches, which macOS empties when space runs low), kept to a size by `prune_thumbs`.
+    PHOTO_BROWSER_THUMB_CACHE overrides it (tests)."""
+    global _THUMB_DIR
+    if _THUMB_DIR is None:
+        env = os.environ.get("PHOTO_BROWSER_THUMB_CACHE")
+        if env:
+            _THUMB_DIR = Path(env)
+        elif IS_MAC:
+            _THUMB_DIR = app_identity.thumb_cache()
+        else:
+            _THUMB_DIR = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "PhotoBrowser" / "MacThumbs"
+    return _THUMB_DIR
+
+
+THUMBS_MOST_GB = 20.0          # the thumbnail folder's size limit (setting thumbs/limit_gb); ~40 KB a thumbnail
+_TOUCH_AFTER = 14 * 86400      # a thumbnail used is marked as used (its modified time) at most this often
+
+
+def prune_thumbs(limit_bytes: int, folder: Path | None = None) -> tuple[int, int]:
+    """The thumbnail folder brought back under `limit_bytes` (to 85 % of it): the least recently used go first —
+    a thumbnail's modified time is when it was made, or last used (`_ThumbJob` marks it, at most every couple of
+    weeks). Returns (thumbnails removed, bytes freed). Leftover `.part` files go too."""
+    folder = folder or thumb_cache_dir()
+    files: list[tuple[float, int, str]] = []
+    total = 0
+    try:
+        subs = list(os.scandir(folder))
+    except OSError:
+        return 0, 0
+    for sub in subs:
+        if not sub.is_dir(follow_symlinks=False):
+            continue
+        try:
+            with os.scandir(sub.path) as it:
+                for e in it:
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if e.name.endswith(".part") and time.time() - st.st_mtime > 3600:
+                        try:
+                            os.remove(e.path)
+                        except OSError:
+                            pass
+                        continue
+                    files.append((st.st_mtime, st.st_size, e.path))
+                    total += st.st_size
+        except OSError:
+            continue
+    if total <= limit_bytes:
+        return 0, 0
+    files.sort()
+    target = int(limit_bytes * 0.85)
+    removed = freed = 0
+    for _mtime, size, path in files:
+        if total - freed <= target:
+            break
+        try:
+            os.remove(path)
+            removed += 1
+            freed += size
+        except OSError:
+            pass
+    return removed, freed
+
+
+def prune_thumbs_later(settings=None) -> None:
+    """Once a day, a minute after launch, on a thread of its own: the thumbnail folder kept to its size."""
+    settings = settings or app_identity.settings()
+    try:
+        last = float(settings.value("thumbs/pruned", 0) or 0)
+        limit_gb = float(settings.value("thumbs/limit_gb", THUMBS_MOST_GB) or THUMBS_MOST_GB)
+    except (TypeError, ValueError):
+        last, limit_gb = 0.0, THUMBS_MOST_GB
+    if time.time() - last < 86400:
+        return
+    settings.setValue("thumbs/pruned", time.time())
+
+    def work() -> None:
+        time.sleep(60)
+        prune_thumbs(int(limit_gb * 1024 ** 3))
+    threading.Thread(target=work, daemon=True, name="prune-thumbs").start()
 
 
 # Photos whose tiles were made before their colours were handled (thumb_color.py — HDR and Display P3 came out
@@ -1181,6 +1259,16 @@ def thumb_key(path: str, mtime: float) -> str:
 def thumb_file(key: str) -> Path:
     h = hashlib.sha1(key.encode("utf-8", "surrogateescape")).hexdigest()
     return thumb_cache_dir() / h[:2] / (h + ".jpg")
+
+
+def _mark_used(f: Path) -> None:
+    """A thumbnail just used is kept ahead of ones not used for a while when the folder is trimmed (`prune_thumbs`)
+    — its modified time moved to now, at most every `_TOUCH_AFTER`."""
+    try:
+        if time.time() - f.stat().st_mtime > _TOUCH_AFTER:
+            os.utime(f, None)
+    except OSError:
+        pass
 
 
 def _save_thumb(img: QImage, f: Path) -> None:
@@ -1518,6 +1606,8 @@ class _ThumbJob(QRunnable):
             f = thumb_file(self.key)
             if f.is_file():
                 img = QImage(str(f))
+                if not img.isNull():
+                    _mark_used(f)
             if img.isNull():
                 img = self._load()
                 if img.isNull() and kind_of(self.path) in ("image", "video"):
@@ -1852,16 +1942,28 @@ class GridDelegate(QStyledItemDelegate):
 
 
 class _Facts(QObject):
-    """Small facts read off the main thread and kept for the session: a video's length (`media_info`) and a
-    folder's cover (the first photo or video in it, by name). `get` answers from what's known — None while
-    it's being read, which starts the read — and `ready` asks the views to repaint once a batch is in."""
+    """Small facts read off the main thread: a video's length (`media_info`) and a folder's cover (the first photo
+    or video in it, by name). `get` answers from what's known — None while it's being read, which starts the read —
+    and `ready` asks the views to repaint once a batch is in. **Kept between launches** (`kind`: facts_store.py —
+    every key carries a modified time), so a folder isn't scanned again, nor a video asked its length, every time
+    the app opens; what's found is written every few seconds and at quit."""
     ready = Signal()
     _got = Signal()
 
-    def __init__(self, read, workers: int = 4) -> None:
+    def __init__(self, read, workers: int = 4, kind: str = "") -> None:
         super().__init__()
         from concurrent.futures import ThreadPoolExecutor
+        import facts_store
         self._read = read
+        self._kind = kind
+        self._store = facts_store.default() if kind else None
+        if self._store is not None:
+            self._flusher = QTimer(self)
+            self._flusher.setInterval(5000)
+            self._flusher.timeout.connect(self._store.flush)
+            self._flusher.start()
+            import atexit
+            atexit.register(self._store.flush)
         self._known: dict = {}
         self._asked: set = set()
         self._lock = threading.Lock()
@@ -1879,6 +1981,16 @@ class _Facts(QObject):
             if key in self._asked:
                 return None
             self._asked.add(key)
+        if self._store is not None:                       # found on an earlier launch: there on the first paint
+            import facts_store
+            kept = self._store.get(self._kind, key)
+            if facts_store.FactsStore.known(kept):
+                if isinstance(kept, list):
+                    kept = tuple(kept)
+                if facts_store.valid(self._kind, kept):
+                    with self._lock:
+                        self._known[key] = kept
+                    return kept
         self._pool.submit(self._work, key)
         return None
 
@@ -1889,6 +2001,8 @@ class _Facts(QObject):
             value = None
         with self._lock:
             self._known[key] = value
+        if self._store is not None and value is not None:   # nothing found isn't kept: it may have been a slow
+            self._store.put(self._kind, key, value)          # drive or a moment's error, so it's asked again next time
         self._got.emit()
 
 
@@ -1936,7 +2050,7 @@ COVERS: _Facts | None = None
 def facts() -> tuple[_Facts, _Facts]:
     global DURATIONS, COVERS
     if DURATIONS is None:
-        DURATIONS, COVERS = _Facts(_read_duration), _Facts(_read_cover, workers=2)
+        DURATIONS, COVERS = _Facts(_read_duration, kind="duration"), _Facts(_read_cover, workers=2, kind="cover")
     return DURATIONS, COVERS
 
 
@@ -9399,6 +9513,7 @@ def main() -> None:
         app.setFont(f)
     global THUMBS
     THUMBS = Thumbnails()
+    prune_thumbs_later()                 # the thumbnail folder kept to its size (once a day, in the background)
     import viewer_surface
     viewer_surface.prepare()             # the viewer's HDR picture (Swift, built once in the background)
     apply_theme(app)

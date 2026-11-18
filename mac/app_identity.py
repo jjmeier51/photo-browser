@@ -65,7 +65,7 @@ def _library(*parts: str) -> Path:
 def _adopt(old: Path, new: Path) -> None:
     """Brings `old` to `new`, once per process: renamed whole when `new` isn't there yet, else whatever `new`
     lacks is moved in. Best effort — a folder that can't be moved is simply still where it was."""
-    key = str(new)
+    key = f"{old}\n{new}"                       # once per pair (two old places may come to one new one)
     with _lock:
         if key in _adopted:
             return
@@ -110,8 +110,13 @@ def web_cache() -> Path:
 
 
 def thumb_cache() -> Path:
-    """The thumbnails kept between launches — carried over: re-making a library's thumbnails takes hours."""
-    new = _library("Caches", "PhotoBrowser", "MacThumbs")
+    """The thumbnails kept between launches — carried over: re-making a library's thumbnails takes hours. In
+    Application Support, not Caches (Nov 18): macOS empties Caches when the disk runs low, and the whole library
+    was then made again — the iPhone app moved its thumbnails out of Caches for the same reason. The app keeps the
+    folder to a size itself (photo_browser.prune_thumbs). The earlier places are carried over (renamed whole —
+    the same disk, so it's instant)."""
+    new = support() / "Thumbnails"
+    _adopt(_library("Caches", "PhotoBrowser", "MacThumbs"), new)
     _adopt(_library("Caches", "PhotoBrowser", OLD_SETTINGS_APP + "Thumbs"), new)
     return new
 

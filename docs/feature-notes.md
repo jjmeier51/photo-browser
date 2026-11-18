@@ -3680,6 +3680,31 @@ as www.facebook.com (tabs found, the watcher catching a page's own data answer, 
 **Not run against facebook.com** — whether the hub tab is named as guessed, and what a scrolled hub loads, needs a
 subscribed account; if it still finds nothing, the saved `facebook-hub-*.json` holds the answer.
 
+### 6aq Photo Browser for Mac's caches persist: thumbnails, folder covers, video lengths (Nov 18, 2026)
+
+"Ensure that thumbnails and folder/album covers are cached for the Mac app."
+- **Thumbnails** already had a memory cache (3,000 / 600 MB) over a disk cache keyed by path + modified time, written
+  by all three makers (Pillow/Qt, the frame helper, Quick Look). But the disk cache was in `~/Library/Caches`, which
+  macOS empties when the disk runs low — the iPhone app moved out of Caches for that reason — and it had no limit.
+  Now: `app_identity.thumb_cache()` = `Application Support/Photo Browser for Mac/Thumbnails`, the old Caches folders
+  carried over by renaming (same disk: instant; `_adopt` now runs once per *pair* of folders, so both old places come
+  over); `prune_thumbs` keeps it under `thumbs/limit_gb` (20 GB, ~500,000 thumbnails) — least recently used first, a
+  thumbnail's modified time moved to "now" when it's used (at most every two weeks, `_mark_used`); once a day, a minute
+  after launch, on its own thread (`prune_thumbs_later`). Stray `.part` files go too.
+- **Folder covers.** A chosen cover's picture was already cached (its thumbnail). But the *automatic* cover — the
+  first photo or video in the folder, found by scanning it up to three levels down — was known only for the session,
+  so every launch scanned every folder on screen again, on the external drive. **Video lengths** on tiles likewise.
+  Now `_Facts(kind="cover" | "duration")` keeps what it finds in `Application Support/…/facts.sqlite`
+  (`mac/facts_store.py`: SQLite, WAL, written every 5 s and at quit, trimmed to 400,000 rows oldest first) and reads
+  it back synchronously on the next launch — so the cover is there on the first paint. Safe because every key carries
+  a modified time: (folder, the folder's mtime), (video, its mtime). A cover is checked when handed out (`valid`: the
+  picture still there with the same mtime — a photo deep in a subfolder can change without the folder's time
+  changing). "Nothing found" isn't kept (it may have been a slow drive), so an empty folder is simply asked again.
+- Tested here: the store across restarts and its trimming; a folder scanned once and answered on the next "launch"
+  with no scan; a changed cover picture looked for again; empty folders not kept; a video length kept; the trim
+  (least recently used out, under the limit nothing); the Caches folder moved to Application Support; the window
+  storing a cover.
+
 #### 7.4h-3 The first real hub run (Nov 17, evening)
 
 A run on a subscribed creator's profile found the hub — Facebook names the tab **"Supporters"**

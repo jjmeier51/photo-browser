@@ -177,6 +177,10 @@ actions the app makes no network calls.
   no colour management): PQ/HLG photos tone-mapped to standard range, Display P3 converted by profile; the HDR curve
   is read from the **main picture's** colour box only (a gain-map photo's other items say PQ — never scan the file
   for it); `thumb_helper.swift` writes 8-bit sRGB; `thumb_key` versions HEIF/AVIF/JXL (no file reads there) — §6ag.
+  **Its caches persist** (§6aq): thumbnails in Application Support/…/Thumbnails (`app_identity.thumb_cache`, **not
+  Caches** — macOS empties that when space runs low), kept under 20 GB by `prune_thumbs` (least recently used first,
+  daily); folder covers found by scanning and video lengths in `facts.sqlite` (`mac/facts_store.py`, `_Facts(kind=…)`)
+  — every key carries a modified time, a cover is re-checked when handed out, "nothing found" is never kept.
   Photo Browser for Mac's **true grid**: the Photo Grid (⌘3) and icon view at minimum spacing (`Pane.tight()`, View ▸ Tight
   Icons) fill the width in whole columns with pictures cropped square — `picture_px()` is a tile's picture side (not
   `icon_px`); the grid keeps its scroll-bar strip there (a `QListView` lays out a bar's width short otherwise).
