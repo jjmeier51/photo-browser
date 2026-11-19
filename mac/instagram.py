@@ -55,6 +55,24 @@ app_id)` and gets back `(status, text)`; `("sleep", s)` spaces the calls out (an
 says to slow down); `("emit", items)` hands found items to the downloads while the crawl goes on; and
 `("note", text)` is a line for the log.
 
+**A run that knows the account's number asks nothing about the account** (Nov 19, a real log: `web_profile_info`
+429 three times, both searches 404, then a crash reading the page — and "nothing new" for a folder of 897 posts). The
+feeds need only the number, and "who is @handle" is the call Instagram limits hardest, so: `known_user_id` (the
+folder's record `user_id`, else the iPhone's backup `instagramFolders[…].userID` — by folder, else by handle) →
+`run` goes straight to `feed/user/<id>/`; the name, picture and privacy are filled in from the feed's own posts
+(`_meet`), which also notices a renamed account (same number: still its posts) and a number read off the page that
+is someone else's (`Profile.sure` False: nothing of theirs is taken, the page is read instead). A number learnt on
+the way — the page's data, a post's `user` — is told to the window again (`("profile", …)`) so the record keeps it.
+Told to slow down during a lookup, the order becomes page → searches (no more counted calls first), with at most
+two `users/<id>/info/` confirmations. **The newest posts come even when the feed is limited**: the profile page the
+lookup opened is read for posts at once (`Profile.page` → `from_page`), and a tab whose feed says "wait a few
+minutes" is opened once, unscrolled (`_watch(scroll=False)`) — the page a person glancing at the profile loads —
+instead of being left for next time; the run's problem line then says only the newest were checked. **A scrolled
+page stops when it reaches what's here** (`Enough`, the visit's `stop`): 30 already-downloaded shortcodes in a row,
+read from the raw answers — a profile of thousands of posts was scrolled to its end for the three new ones at its
+top. **Data in a shape not seen before never ends a run**: usernames and names are read through `uname` /
+`text_of` (the crash was a `"username"` that was an object), and each post is taken inside its own guard (`ODD`).
+
 **Exclusive (subscriber-only) content** (Nov 16): posts, reels and stories only a creator's subscribers see come with
 the rest when the login subscribes — a post that arrives without a shortcode (Instagram gives Exclusive posts none),
 or one whose own keys say "subscribers" (`social.is_exclusive`; no single key is trusted, Instagram doesn't document
@@ -74,7 +92,7 @@ import json
 import os
 import random
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
 
@@ -120,6 +138,18 @@ def id_string(v) -> str | None:
     return str(v) if isinstance(v, str) and v else None
 
 
+def uname(obj, key: str = "username") -> str:
+    """An object's username, lower case — "" when it has none **or it isn't text**. What a page loads holds objects
+    whose "username" is another object (a form's field, a schema), and calling `.lower()` on one ended a whole run
+    (Nov 19: "AttributeError: 'dict' object has no attribute 'lower'")."""
+    v = obj.get(key) if isinstance(obj, dict) else None
+    return v.lower() if isinstance(v, str) else ""
+
+
+def text_of(v, default: str = "") -> str:
+    return v if isinstance(v, str) else default
+
+
 # ----------------------------------------------------------------------------- the profile
 
 @dataclass
@@ -130,6 +160,8 @@ class Profile:
     pic: str = ""
     posts: int = 0
     private: bool = True             # unknown → private: the session's cookies go with the media
+    sure: bool = True                # False: the number was read off the page and nothing has confirmed it yet
+    page: dict | None = field(default=None, repr=False, compare=False)   # the profile page as the lookup opened it
 
 
 def profile_from_info(doc: dict, handle: str) -> Profile | None:
@@ -151,18 +183,18 @@ def profile_from_search(doc: dict, handle: str) -> Profile | None:
     want = handle.lower()
     for entry in (doc.get("users") or []) if isinstance(doc, dict) else []:
         u = (entry or {}).get("user") or {}
-        if (u.get("username") or "").lower() != want:
+        if uname(u) != want:
             continue
         uid = id_string(u.get("pk")) or id_string(u.get("id"))
         if uid:
-            return Profile(uid, u.get("username") or handle, u.get("full_name") or "",
-                           u.get("profile_pic_url") or "", 0, u.get("is_private", True) is not False)
+            return Profile(uid, text_of(u.get("username")) or handle, text_of(u.get("full_name")),
+                           text_of(u.get("profile_pic_url")), 0, u.get("is_private", True) is not False)
     return None
 
 
 def profile_from_user(user: dict, handle: str) -> Profile | None:
     """From a full user object (`users/<id>/info/`'s "user") — only when it's the handle asked for."""
-    if not isinstance(user, dict) or (user.get("username") or "").lower() != handle.lower():
+    if not isinstance(user, dict) or uname(user) != handle.lower():
         return None
     uid = id_string(user.get("pk")) or id_string(user.get("pk_id")) or id_string(user.get("id"))
     if not uid:
@@ -184,13 +216,13 @@ def profile_in(doc, handle: str, depth: int = 0) -> Profile | None:
         return None
     if isinstance(doc, dict):
         uid = next((id_string(doc.get(k)) for k in _USER_ID_KEYS if id_string(doc.get(k))), None)
-        if (doc.get("username") or "").lower() == handle.lower() and uid and uid.isdigit():
+        if uname(doc) == handle.lower() and uid and uid.isdigit():
             edge = doc.get("edge_owner_to_timeline_media") if isinstance(doc.get("edge_owner_to_timeline_media"), dict) else {}
             try:
                 posts = int(doc.get("media_count") or edge.get("count") or 0)
             except (TypeError, ValueError):
                 posts = 0
-            return Profile(uid, doc.get("username"), doc.get("full_name") or "", doc.get("profile_pic_url") or "", posts,
+            return Profile(uid, doc.get("username"), text_of(doc.get("full_name")), text_of(doc.get("profile_pic_url")), posts,
                            doc.get("is_private", True) is not False)
         for v in doc.values():
             if isinstance(v, (dict, list)) and (p := profile_in(v, handle, depth + 1)):
@@ -329,7 +361,7 @@ def _theirs(u, profile_id: str, handle: str) -> bool:
     """A story item's owner is the account: by username, else by number (when either is known)."""
     if not isinstance(u, dict):
         return True
-    name = (u.get("username") or "").lower()
+    name = uname(u)
     if name and handle:
         return name == handle.lower()
     uid = id_string(u.get("pk")) or id_string(u.get("id"))
@@ -480,7 +512,7 @@ def item_id(item: dict) -> str | None:
 
 def _tagged(m: dict, user: tuple[str, str]) -> bool:
     for t in ((m.get("usertags") or {}).get("in") or []):
-        u = (t or {}).get("user") or {}
+        u = t.get("user") if isinstance(t, dict) and isinstance(t.get("user"), dict) else {}
         if id_string(u.get("pk")) == user[0] or u.get("username") == user[1]:
             return True
     return False
@@ -507,11 +539,11 @@ def items_for(item: dict, key: str, folder: Path, poster: str, tagged: tuple[str
     """A post's photos/videos as downloads: `<key>`, or `<key>_1`, `_2`… for several. `is_exclusive` None: read
     from the post (`exclusive`)."""
     excl = exclusive(item) if is_exclusive is None else is_exclusive
-    when = float(item.get("taken_at") or 0)
+    when = _number(item.get("taken_at"))
     caption = ((item.get("caption") or {}).get("text") or "") if isinstance(item.get("caption"), dict) else ""
     loc = item.get("location") if isinstance(item.get("location"), dict) else {}
     lat, lng = loc.get("lat"), loc.get("lng")
-    who = ((item.get("user") or {}).get("username") or poster) if isinstance(item.get("user"), dict) else poster
+    who = (text_of(item["user"].get("username")) or poster) if isinstance(item.get("user"), dict) else poster
     if tagged and item.get("media_type") == 8 and isinstance(item.get("carousel_media"), list):
         carousel = [c for c in item["carousel_media"] if isinstance(c, dict)]
         has_tags = any((c.get("usertags") or {}).get("in") is not None for c in carousel)
@@ -652,6 +684,51 @@ def record(folder: str | Path) -> social.Record:
     return social.Record.load(folder, RECORD, FORMAT)
 
 
+def phone_user_id(folder: str | Path, handle: str) -> str:
+    """The account's number as the iPhone app has it, from its backup on the drive (`metadata.json` →
+    `instagramFolders`: drive-relative folder → {handle, userID, …}): this folder's entry, else any folder's with
+    the same handle. "" when there's no backup or it doesn't know the account."""
+    import unicodedata
+    import tiktok                                          # the backup's place on the drive is found there
+    root = tiktok.drive_root(folder)
+    if root is None:
+        return ""
+    try:
+        with open(os.path.join(root, tiktok.BACKUP_DIR, tiktok.BACKUP_JSON), "rb") as f:
+            doc = json.loads(f.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return ""
+    table = doc.get("instagramFolders") if isinstance(doc, dict) else None
+    if not isinstance(table, dict):
+        return ""
+
+    def nfc(t: str) -> str:
+        return unicodedata.normalize("NFC", t)
+
+    def number(info) -> str:
+        uid = id_string(info.get("userID")) if isinstance(info, dict) else None
+        return uid if uid and uid.isdigit() else ""
+    rel = os.path.relpath(os.path.abspath(str(folder)), root)
+    want = handle.lower()
+    own = next((v for k, v in table.items() if nfc(str(k)) == nfc(rel)), None)
+    if number(own) and uname(own, "handle") in ("", want):
+        return number(own)
+    return next((number(v) for v in table.values() if uname(v, "handle") == want and number(v)), "")
+
+
+def known_user_id(folder: str | Path, handle: str, rec: social.Record | None = None) -> str:
+    """The account's number when it's already known — the folder's record (`user_id`, written by both apps), else
+    the iPhone's backup — so a run needn't ask Instagram who @handle is (`run`). "" when it isn't."""
+    rec = rec if rec is not None else record(folder)
+    uid = id_string(rec.get("user_id")) or ""
+    if uid.isdigit() and uname(rec.fields, "handle") in ("", handle.lower()):
+        return uid
+    try:
+        return phone_user_id(folder, handle)
+    except Exception:  # noqa: BLE001 — a backup in a shape not seen before: the account is simply looked up
+        return ""
+
+
 def is_post_id(s: str) -> bool:
     """A post shortcode (10–12 of A–Z a–z 0–9 - _) or a story/highlight pk (15–22 digits) — the iPhone's
     `isInstagramID`."""
@@ -675,14 +752,14 @@ def destination(person: str | Path, handle: str) -> Path:
     folder that merely shares the handle's name ("Jane" for @jane) is not the profile's."""
     person = Path(person)
     want = handle.lower()
-    if (record(person).get("handle") or "").lower() == want or (person.name.lower() == want and holds_posts(person)):
+    if uname(record(person).fields, "handle") == want or (person.name.lower() == want and holds_posts(person)):
         return person
     try:
         subs = sorted((e for e in os.scandir(person) if e.is_dir() and not e.name.startswith(".")), key=lambda e: e.name)
     except OSError:
         subs = []
     for e in subs:
-        if (record(e.path).get("handle") or "").lower() == want:
+        if uname(record(e.path).fields, "handle") == want:
             return Path(e.path)
     for e in subs:
         if e.name.lower() == want:
@@ -826,6 +903,8 @@ def _crawl(calls: _Calls, kind: str, profile: Profile, folder: Path, already: se
     max_id = None
     seen = 0
     failure = ""
+    odd: list[str] = []
+    told = False
     for _page in range(400 if kind != "clips" else 200):
         if kind == "clips":
             body = f"target_user_id={profile.user_id}&page_size=12&include_feed_video=true"
@@ -844,28 +923,44 @@ def _crawl(calls: _Calls, kind: str, profile: Profile, folder: Path, already: se
         retag: list[str] = []
         items = doc.get("items") if isinstance(doc.get("items"), list) else []
         stop = False
+        if kind != "tagged" and _page == 0:
+            other = _meet(profile, items, kind)
+            if other and not profile.sure:               # the number read off the page is someone else's
+                profile.user_id = ""
+                return f"the account number found on the page belongs to @{other}, not @{profile.handle}"
+            if other:
+                yield ("note", f"   this account is named @{other} on Instagram now (it was @{profile.handle} when "
+                               "the folder was made) — still the same account, so its posts come here")
         for wrapper in items:
-            item = wrapper.get("media") if kind == "clips" and isinstance(wrapper.get("media"), dict) else wrapper
-            if not isinstance(item, dict):
-                continue
-            key = item_id(item)
-            if not key:
-                continue
-            excl = exclusive(item, from_feed=True)
-            if excl and social.is_locked(item):
-                locked[0] += 1                           # not subscribed: only a preview — never taken as the post
-                continue
-            if excl and key in already and key not in seen_keys:
-                retag += done_files(item, key, folder, profile.handle, tagged)   # downloaded before, untagged
-            if key in already or key in seen_keys:
-                seen += 1
-                if seen >= SEEN_RUN and float(item.get("taken_at") or 0) < floor:
-                    stop = True
-                    break
+            try:
+                item = wrapper.get("media") if kind == "clips" and isinstance(wrapper.get("media"), dict) else wrapper
+                if not isinstance(item, dict):
+                    continue
+                key = item_id(item)
+                if not key:
+                    continue
+                excl = exclusive(item, from_feed=True)
+                if excl and social.is_locked(item):
+                    locked[0] += 1                       # not subscribed: only a preview — never taken as the post
+                    continue
+                if excl and key in already and key not in seen_keys:
+                    retag += done_files(item, key, folder, profile.handle, tagged)   # downloaded before, untagged
+                if key in already or key in seen_keys:
+                    seen += 1
+                    if seen >= SEEN_RUN and _number(item.get("taken_at")) < floor:
+                        stop = True
+                        break
+                    continue
+                made = items_for(item, key, folder, profile.handle, tagged, is_exclusive=excl)
+            except ODD as e:                             # a post in a shape not seen before: left, the rest go on
+                odd.append(f"{type(e).__name__}: {e}")
                 continue
             seen = 0
             seen_keys.add(key)
-            batch += items_for(item, key, folder, profile.handle, tagged, is_exclusive=excl)
+            batch += made
+        if odd and not told:
+            told = True
+            yield ("note", f"   a post came in a shape this doesn't know and was left out ({odd[0]}) — the rest go on")
         if batch:
             yield ("emit", batch)
         if retag:
@@ -878,6 +973,40 @@ def _crawl(calls: _Calls, kind: str, profile: Profile, folder: Path, already: se
         if not more or not max_id or not items:
             break
     return failure
+
+
+ODD = (AttributeError, TypeError, KeyError, ValueError, IndexError)   # what data in an unexpected shape raises
+
+
+def _number(v) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _meet(profile: Profile, items: list, kind: str) -> str:
+    """The first page of the account's own feed says who it is: the profile's name, picture and privacy are filled
+    in from its posts' `user` (a run that began from a known number asked nothing else). Returns the username the
+    feed's posts carry when it isn't the handle asked for (the account was renamed — or the number is wrong)."""
+    for wrapper in items:
+        item = wrapper.get("media") if kind == "clips" and isinstance(wrapper, dict) and \
+            isinstance(wrapper.get("media"), dict) else wrapper
+        u = item.get("user") if isinstance(item, dict) else None
+        if not isinstance(u, dict) or not uname(u):
+            continue
+        uid = id_string(u.get("pk")) or id_string(u.get("id")) or ""
+        if profile.user_id and uid and uid != profile.user_id:
+            continue                                     # a co-author's post: not who the feed belongs to
+        if uname(u) != profile.handle.lower():
+            return uname(u)
+        profile.sure = True
+        profile.full_name = profile.full_name or text_of(u.get("full_name"))
+        profile.pic = profile.pic or text_of(u.get("profile_pic_url"))
+        if isinstance(u.get("is_private"), bool):
+            profile.private = u["is_private"]
+        return ""
+    return ""
 
 
 def _said(name: str, status: int, doc) -> str:
@@ -935,19 +1064,36 @@ def look_up(calls: _Calls, handle: str, known_user_id: str = ""):
                 return Profile(known_user_id, handle), False, tried
             break
     calls.app_id = apps[0]
-    for name, path in (("top search", f"web/search/topsearch/?context=blended&query={quote(handle.lower(), safe='')}"),
-                       ("search", f"fbsearch/web/top_serp/?enable_metadata=true&query={q}")):
-        status, doc, text = yield from calls.call(API + path, retries=0 if throttled else 1)
-        profile = profile_in(doc, handle) if doc is not None else None
+    searches = (("top search", f"web/search/topsearch/?context=blended&query={quote(handle.lower(), safe='')}"),
+                ("search", f"fbsearch/web/top_serp/?enable_metadata=true&query={q}"))
+
+    def search(retries: int):
+        """yield from: the account from the site's searches (an exact username match), or None."""
+        for name, path in searches:
+            status, doc, text = yield from calls.call(API + path, retries=retries)
+            try:
+                found = profile_in(doc, handle) if doc is not None else None
+            except ODD:
+                found = None
+            if found is not None:
+                return found
+            note(name, status, doc, text)
+        return None
+
+    searched = not throttled        # told to slow down: the page first (what a browser loads anyway), searches last
+    if searched:
+        profile = yield from search(1)
         if profile is not None:
             return profile, False, tried
-        note(name, status, doc, text)
     status, _doc, html = yield from calls.call(f"{HOME}{q}/", retries=0 if throttled else 1, page=True)
     html = html if isinstance(html, str) else ""
     page_gone = bool(status) and status != 429 and page_missing(status, html)
     if 200 <= status < 300 and not page_gone:
         beside = ids_beside(html, handle)
-        for uid in ids_in_page(html, handle)[:4]:
+        if throttled and beside:                         # written beside the handle: taken, and checked against the
+            yield ("note", f"   found @{handle}'s number on its profile page ({beside[0]})")   # feed's own posts
+            return Profile(beside[0], handle, sure=False), False, tried
+        for uid in ids_in_page(html, handle)[:2 if throttled else 4]:   # (its own endpoint, its own limit)
             s2, d2, _t2 = yield from calls.call(f"{API}users/{uid}/info/", retries=0 if throttled else 1)
             profile = profile_from_user((d2 or {}).get("user") if isinstance(d2, dict) else None, handle)
             if profile is not None:
@@ -959,8 +1105,13 @@ def look_up(calls: _Calls, handle: str, known_user_id: str = ""):
         yield ("note", f"   {line}")
     # 4. the page itself, as the person sees it
     seen = yield ("visit", f"{HOME}{q}/", False)
-    profile = profile_from_page(seen or {}, handle)
+    try:
+        profile = profile_from_page(seen or {}, handle)
+    except ODD as e:                                     # the page's data in a shape not seen before
+        profile = None
+        tried.append(f"profile page: couldn't be read ({type(e).__name__}: {e})")
     if profile is not None:
+        profile.page = seen
         saved = "" if profile.user_id and profile.posts else dump_visit(seen or {}, handle)
         yield ("note", f"   found @{profile.handle} on its profile page" +
                        (f" (account {profile.user_id})" if profile.user_id else
@@ -968,6 +1119,13 @@ def look_up(calls: _Calls, handle: str, known_user_id: str = ""):
                        (f"; what the page loaded is saved in {saved}" if saved else ""))
         return profile, False, tried
     page_gone = page_gone or page_missing(int((seen or {}).get("status") or 200), (seen or {}).get("html") or "")
+    if not searched and not page_gone:                   # the page didn't say: the searches, once each
+        before = len(tried)
+        profile = yield from search(0)
+        if profile is not None:
+            return profile, False, tried
+        for line in tried[before:]:
+            yield ("note", f"   {line}")
     if (seen or {}).get("answers"):
         saved = dump_visit(seen or {}, handle)
         if saved:
@@ -979,6 +1137,7 @@ def look_up(calls: _Calls, handle: str, known_user_id: str = ""):
 
 
 WATCH_PATHS = {"feed": "", "tagged": "tagged/", "clips": "reels/"}
+LIMITED = "limited"                 # a tab's outcome: Instagram is limiting requests; only its newest were checked
 
 
 def _owned(item: dict, profile: Profile) -> bool:
@@ -986,31 +1145,79 @@ def _owned(item: dict, profile: Profile) -> bool:
     u = item.get("user") if isinstance(item.get("user"), dict) else item.get("owner")
     if not isinstance(u, dict):
         return True
-    uid, name = id_string(u.get("pk")) or id_string(u.get("id")), (u.get("username") or "").lower()
+    uid, name = id_string(u.get("pk")) or id_string(u.get("id")), uname(u)
     if name:
         return name == profile.handle.lower()
     return not profile.user_id or uid == profile.user_id      # no name to go by: its number, when known
 
 
-def _watch(kind: str, profile: Profile, folder: Path, already: set[str], seen_keys: set[str]):
-    """yield from: the posts of one tab of the profile (posts / tagged / reels) read from the page itself — opened
-    in the window and scrolled to its end, every post object the page loaded taken (`posts_in`). For when
-    Instagram refuses its own feed endpoints to these reads. Returns how many answers the page loaded."""
+_CODE = re.compile(r'"code"\s*:\s*"([A-Za-z0-9_-]{5,14})"')
+SEEN_ON_PAGE = 2 * SEEN_RUN         # posts in a row already here before a page's scrolling may stop
+
+
+class Enough:
+    """Tells a scrolled page when it has shown enough (`("visit", …, stop)`: called with each new batch of the
+    page's answers, True ends the scrolling): `SEEN_ON_PAGE` posts in a row that are already downloaded. A profile
+    of thousands of posts used to be scrolled to its very end — a quarter of an hour — to find the three new ones
+    at its top. Reads only the shortcodes in the raw answers (no parsing: it runs on the window's thread); twice
+    the API crawl's run, since a page can't be asked a post's date this cheaply."""
+
+    def __init__(self, already: set[str]) -> None:
+        self.already = already
+        self.met: set[str] = set()
+        self.run = 0
+
+    def __call__(self, texts: list[str]) -> bool:
+        for text in texts:
+            for code in _CODE.findall(text if isinstance(text, str) else ""):
+                if code in self.met:
+                    continue
+                self.met.add(code)
+                self.run = self.run + 1 if code in self.already else 0
+        return self.run >= SEEN_ON_PAGE
+
+
+def from_page(seen: dict, kind: str, profile: Profile, folder: Path, already: set[str],
+              seen_keys: set[str]) -> list[social.Item]:
+    """The new downloads among the posts a visited page loaded (`posts_in`) — the profile's own (another account's
+    suggested posts left out), not already here, never a locked preview. A post in a shape not seen before is left;
+    the rest are taken."""
     tagged = (profile.user_id, profile.handle) if kind == "tagged" else None
-    seen = yield ("visit", f"{HOME}{quote(profile.handle, safe='')}/{WATCH_PATHS[kind]}", True)
     batch: list[social.Item] = []
-    for doc in page_docs(seen or {}):
+    try:
+        docs = page_docs(seen or {})
+    except ODD:
+        docs = []
+    for doc in docs:
         for item in posts_in(doc):
-            u = item.get("user") if isinstance(item.get("user"), dict) else {}
-            if not profile.user_id and (u.get("username") or "").lower() == profile.handle.lower():
-                profile.user_id = id_string(u.get("pk")) or id_string(u.get("id")) or ""   # learnt from its own posts
-            key = item_id(item)
-            if not key or key in already or key in seen_keys or (kind != "tagged" and not _owned(item, profile)):
+            try:
+                u = item.get("user") if isinstance(item.get("user"), dict) else {}
+                if not profile.user_id and uname(u) == profile.handle.lower():
+                    profile.user_id = id_string(u.get("pk")) or id_string(u.get("id")) or ""   # learnt from its posts
+                key = item_id(item)
+                if not isinstance(key, str) or not key or key in already or key in seen_keys or \
+                        (kind != "tagged" and not _owned(item, profile)):
+                    continue
+                if social.is_exclusive(item) and social.is_locked(item):
+                    continue                             # a subscriber-only post's preview: not the post
+                made = items_for(item, key, folder, profile.handle, tagged)
+            except ODD:
                 continue
-            if social.is_exclusive(item) and social.is_locked(item):
-                continue                                 # a subscriber-only post's preview: not the post
             seen_keys.add(key)
-            batch += items_for(item, key, folder, profile.handle, tagged)
+            batch += made
+    return batch
+
+
+def _watch(kind: str, profile: Profile, folder: Path, already: set[str], seen_keys: set[str],
+           scroll: bool = True, whole: bool = False):
+    """yield from: the posts of one tab of the profile (posts / tagged / reels) read from the page itself — opened
+    in the window and scrolled until it shows posts already here (`Enough`; to its very end on a first download,
+    `whole`), every post object the page loaded taken (`from_page`). For when Instagram refuses its own feed
+    endpoints to these reads. `scroll` False: only what the page shows as it opens — the newest posts — for when
+    Instagram is limiting requests and more would only add to that. Returns how many answers the page loaded."""
+    stop = Enough(already) if scroll and already and not whole else None
+    seen = yield ("visit", f"{HOME}{quote(profile.handle, safe='')}/{WATCH_PATHS[kind]}", scroll, "", "", 6, stop)
+    batch = from_page(seen or {}, kind, profile, folder, already, seen_keys)
     if batch:
         yield ("emit", batch)
     return len((seen or {}).get("answers") or [])
@@ -1026,11 +1233,15 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
         calls.app_id = app_id_from(home_html)
 
     calls.referer = f"{HOME}{quote(handle, safe='')}/"
-    yield ("note", f"Looking up @{handle}…")
-    profile, missing, tried = yield from look_up(calls, handle, known_user_id)
-    if profile is None and known_user_id:
+    profile, missing, tried = None, False, []
+    if known_user_id:
+        # The account's number is all the feeds need, and asking who @handle is (`web_profile_info`) is the call
+        # Instagram limits hardest — a run that knows the number doesn't make it (Nov 19).
         profile = Profile(known_user_id, handle)
-        yield ("note", f"   using @{handle}'s id from the folder's record ({known_user_id})")
+        yield ("note", f"@{handle}'s account number is already known ({known_user_id}) — going straight to its posts")
+    else:
+        yield ("note", f"Looking up @{handle}…")
+        profile, missing, tried = yield from look_up(calls, handle)
     if profile is None:
         login = next((t for t in tried if t.startswith(("Instagram asked for a login", "Instagram wants to check"))), "")
         if login:
@@ -1061,6 +1272,16 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
             result = stop.value
         return result
 
+    head_read = False
+    if profile.page:                                     # the lookup opened the profile page: its newest posts are
+        batch = from_page(profile.page, "feed", profile, folder, already, seen_keys)   # in hand already
+        head_read = bool((profile.page or {}).get("answers"))
+        profile.page = None
+        if batch:
+            found[0] += len(batch)
+            yield ("note", f"   {len({it.key for it in batch})} new post(s) on the profile page as it opened")
+            yield ("emit", batch)
+
     def tab(kind: str, label: str):
         """yield from: one tab through the API, else read from the page itself. Returns the failure, if both."""
         yield ("note", f"Finding {label}…")
@@ -1070,21 +1291,42 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
             if not failure:
                 return ""
             if "limiting requests" in failure:
-                yield ("note", f"   Instagram is limiting requests right now — the {label} will come next time "
-                               "(reading the pages would only add to the limit)")
-                return failure
+                # Scrolling a whole tab would only add to the limit — but the page as it opens (one page, as the
+                # person glancing at the profile loads it) shows the newest posts, which is what an update is after.
+                if kind == "feed" and head_read:
+                    yield ("note", f"   Instagram is limiting requests right now — only the newest {label} (the top "
+                                   "of the profile page) were checked; the rest will come next time")
+                    return LIMITED
+                yield ("note", f"   Instagram is limiting requests right now — checking only the top of the {label} "
+                               "page (the newest ones); the rest will come next time")
+                loaded = yield from counting(_watch(kind, profile, folder, already, seen_keys, scroll=False))
+                yield ("note", f"   {found[0] - before} new from the top of the page"
+                               + ("" if loaded else " (it loaded nothing)"))
+                return LIMITED if loaded else failure
             yield ("note", f"   Instagram's {label} feed didn't answer ({failure.rstrip('.')}) — reading them from the "
                            "profile page instead")
         else:
             failure = "Instagram didn't give the account's number"
-        loaded = yield from counting(_watch(kind, profile, folder, already, seen_keys))
+        loaded = yield from counting(_watch(kind, profile, folder, already, seen_keys, whole=since <= 0))
         yield ("note", f"   {found[0] - before} new from the page" + ("" if loaded else " (it loaded nothing)"))
         return "" if loaded else failure
 
+    told = (profile.user_id, profile.full_name)
+
+    def learnt():
+        """yield from: the profile again once its posts have said more — its name, or its number (kept in the
+        folder's record, so the next run needn't ask)."""
+        nonlocal told
+        if (profile.user_id, profile.full_name) != told:
+            told = (profile.user_id, profile.full_name)
+            yield ("profile", profile)
+
     feed_failure = yield from tab("feed", "posts")
+    yield from learnt()
     if opts.tagged:
         yield from tab("tagged", "tagged posts")
     yield from tab("clips", "reels")
+    yield from learnt()
     if opts.stories:
         yield ("note", "Finding stories…")
         stories: dict[str, dict] = {}
@@ -1153,6 +1395,9 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
     if locked[0]:
         yield ("note", f"{locked[0]} subscriber-only (Exclusive) post(s) are locked for this login — only their previews "
                        "came, so they were left. Subscribed? Check you're logged in as that account in the window above.")
-    if feed_failure:
+    if feed_failure == LIMITED:
+        out.problem = ("Instagram is limiting requests right now, so only the newest posts were checked. "
+                       "Wait 10–15 minutes and press Download again for the rest.")
+    elif feed_failure:
         out.problem = f"Couldn’t check for new posts — {feed_failure}"
     return out

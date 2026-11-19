@@ -486,7 +486,8 @@ class SocialWindow(QMainWindow):
             already = self.record.downloaded | ig.ids_on_disk(self.dest)
             since = float(self.record.get("last_updated") or 0)
             self._log(f"@{text} → “{self._shown(self.dest)}” — {len(already)} post(s) already here")
-            gen = ig.run(text, self.dest, already, self.opts, since, str(self.record.get("user_id") or ""))
+            # the account's number, when the folder's record or the iPhone's backup has it: no lookup is made then
+            gen = ig.run(text, self.dest, already, self.opts, since, ig.known_user_id(self.dest, text, self.record))
         else:
             gen = fb.run(text, self.person, self._fb_already, self.opts)
         self._say(f"Reading {self.k['name']}…")
@@ -615,7 +616,7 @@ class SocialWindow(QMainWindow):
             self._api(req[1], req[2], req[3], req[4] if len(req) > 4 else self.k["referer"], cb)
         elif kind == "visit":
             self._visit(req[1], bool(req[2]), cb, req[3] if len(req) > 3 else "", req[4] if len(req) > 4 else "",
-                        int(req[5]) if len(req) > 5 else 6)
+                        int(req[5]) if len(req) > 5 else 6, req[6] if len(req) > 6 else None)
         elif kind == "page":
             self.fb_reads = getattr(self, "fb_reads", 0) + 1
             if self.fb_reads % FRESH_EVERY == 0:
@@ -764,7 +765,8 @@ class SocialWindow(QMainWindow):
             return page
         return self.api
 
-    def _visit(self, url: str, scroll: bool, done, press: str = "", find: str = "", patience: int = 6) -> None:
+    def _visit(self, url: str, scroll: bool, done, press: str = "", find: str = "", patience: int = 6,
+               stop=None) -> None:
         """Opens `url` in the window's browser, as the person would, and hands back what the page loaded to draw
         it — its own data answers and its HTML — after it has settled, or (`scroll`) after it's been scrolled to
         its end, so it loads every post: {"answers": [...], "html": ..., "url": ..., "status": 200/404}. `press`: a
@@ -772,7 +774,8 @@ class SocialWindow(QMainWindow):
         "View story" in front of someone's stories — as the person would. `find`: the links on the page whose words
         or address match it (a regular expression) come back too, as "links": [{text, href}] — a profile's tabs.
         `patience`: scroll steps in a row with nothing new (the page no taller, no new answers) before it counts as
-        the end.
+        the end. `stop`: called with each scroll step's new answers (their text); True ends the scrolling there —
+        the page has shown enough (Instagram: posts already downloaded). It must be quick: it runs here.
         A Facebook page is opened with the watcher's mark (`WATCH_MARK`) and the browser is blank again after."""
         import fanfix
         page = self.view.page()
@@ -844,7 +847,17 @@ class SocialWindow(QMainWindow):
             except ValueError:
                 st = {}
             grew = st.get("height") != state["height"] or bool(st.get("moved")) or len(answers) > state["seen"]
+            fresh = answers[state["seen"]:]
             state["seen"] = len(answers)
+            if stop is not None and fresh:
+                try:
+                    enough = bool(stop(fresh))
+                except Exception:  # noqa: BLE001 — a check that fails just doesn't end the scrolling early
+                    enough = False
+                if enough:
+                    self._log("   the page has reached posts that are already here — no need to scroll further")
+                    finish()
+                    return
             state["height"] = st.get("height")
             state["idle"] = 0 if grew else state["idle"] + 1
             if state["idle"] >= patience:                    # the end of the page: nothing more loads
@@ -908,13 +921,20 @@ class SocialWindow(QMainWindow):
         if self.kind == "instagram":
             p: ig.Profile = value
             name = p.full_name or (str(self.record.get("full_name") or "") if self.record is not None else "")
-            self.info = dict(handle=p.handle, user_id=p.user_id, full_name=name)
+            info = dict(handle=p.handle, full_name=name)
+            if p.user_id:                               # never an empty number over one the record has
+                info["user_id"] = p.user_id
+            again = bool(self.info)                     # told again once its posts said more (a name, its number)
             self.private = p.private
-            if p.full_name or p.posts:
-                self._log(f"@{p.handle} — {p.full_name or 'no name'}, {p.posts or '?'} posts"
+            if info == self.info:
+                return
+            self.info = info
+            if p.posts:
+                self._log(f"@{p.handle} — {p.full_name or 'no name'}, {p.posts} posts"
                           + (" (private)" if p.private else ""))
-            else:                                       # only the number is known (the record's, or the page's)
-                self._log(f"@{p.handle}" + (f" — {name}" if name else "") + f" (account {p.user_id})")
+            elif not again or p.user_id:                # only the number is known (the record's, or the page's)
+                self._log(f"@{p.handle}" + (f" — {name}" if name else "")
+                          + (f" (account {p.user_id})" if p.user_id else ""))
         else:
             p, folder = value
             self.info = dict(profile_name=p.name, profile_id=p.id, profile_url=p.url)
@@ -1040,6 +1060,10 @@ class SocialWindow(QMainWindow):
         self.crawl_done = True
         if error is not None:
             self._log(f"Stopped: {type(error).__name__}: {error}")
+            import traceback                            # where it happened, for the log kept on this Mac
+            for line in "".join(traceback.format_exception(type(error), error, error.__traceback__)).splitlines():
+                self._log_file("    " + line)
+            self._log(f"   (the details are in {app_identity.logs() / (self.kind + '-downloads.log')})")
         self.outcome = outcome
         if outcome is not None and outcome.problem:
             self._log(outcome.problem)

@@ -3867,6 +3867,40 @@ Tested: the reader with 1 s answers (an even pace at the ceiling, never over it,
 uploads shortcut and its fallback; a DASH download with both halves at once; the earlier Facebook, Instagram and
 exclusive tests. **Not run against Meta's sites.**
 
+#### 7.4e-3 Instagram: "nothing new" for a folder of 897 posts (Nov 19, 2026)
+
+A real log from the Mac: `web_profile_info` answered 429 three times, both searches 404, the profile page 200 — then
+`Stopped: AttributeError: 'dict' object has no attribute 'lower'` and "nothing new". Three things were wrong, in
+`mac/instagram.py` and `mac/social_downloader.py`:
+
+- **The crash.** Reading the profile page's data (`profile_in`), an object's `"username"` was itself an object and
+  `.lower()` was called on it. Every username / handle / name read now goes through `uname` / `text_of` (a string or
+  nothing), each post is turned into downloads inside its own guard (`ODD` — one in a shape not seen before is left
+  out and said once, the rest go on), and a run that does stop on an error writes the traceback to
+  `~/Library/Logs/<app>/instagram-downloads.log` and says so in the window.
+- **The lookup wasn't needed.** The feeds take the account's number, and asking who `@handle` is costs the call
+  Instagram limits hardest (plus ~45 s of backing off here). `ig.known_user_id(folder, handle, record)` — the
+  folder's `.instagram.json` `user_id`, else the iPhone's backup on the drive (`metadata.json` →
+  `instagramFolders[rel].userID`, by folder, else by handle) — and `run` then makes no lookup call at all. The
+  name/picture/privacy come from the first feed page's posts (`_meet`); a renamed account (same number, new
+  username) is said and still downloaded; a number read off the page unconfirmed (`Profile.sure` False, taken when
+  throttled) that turns out to be someone else's is dropped and the page read instead. A number learnt mid-run is
+  yielded again as `("profile", …)` and saved in the record, so the next run is a known-number run.
+- **Limited meant "next time".** A feed that answered "wait a few minutes" was skipped entirely. Now the newest posts
+  still come: the page the lookup opened is read for posts straight away (`Profile.page` → `from_page`), and a
+  limited tab's page is opened once **without scrolling** (one page load, as a person glancing at the profile).
+  The run ends with "only the newest posts were checked — wait 10–15 minutes" (`LIMITED`). Still never: scrolling
+  whole tabs or retrying harder against a limit.
+
+Also: a throttled lookup goes page → (two id confirmations at most) → opened page → searches, instead of spending
+counted calls on searches first; and **a scrolled page stops once it shows what's already here** — the visit request
+takes a 7th element `stop` (`ig.Enough(already)`: 30 known shortcodes in a row, read by regex from the raw answers
+on the window's thread, no JSON parsing), on updates only (`since > 0`; a first download still reads to the end).
+
+Not run against instagram.com (scripted answers and a local mock page in the real window only:
+`ig/test_ig.py`, `ig/test_new.py`, `ig/t_win.py` in the session scratchpad). The 404s from both searches in the log
+suggest those endpoints are gone from the site; they're kept as the last resort because they cost one call each.
+
 #### 7.4h-3 The first real hub run (Nov 17, evening)
 
 A run on a subscribed creator's profile found the hub — Facebook names the tab **"Supporters"**

@@ -349,7 +349,7 @@ written through `simpcity.ExifPool`, saves every 60 s — §7.4b-3. (`SimpCitySe
   automatically, and dates each file with its own upload time (`created(page, id)`, with the time zone); a run
   reads only what's new in an album it read to the end before (record `albums`: head/tail) and paces itself
   adaptively under 50 pages a minute (earned up to 75; spaced evenly from each read's start). **Meta's counted requests
-  are never made faster than their limits** — speed comes from reading less and downloading wider (§7.4e-2). Same
+  are never made faster than their limits** — speed comes from reading less and downloading wider (§7.4e-2). **Instagram (Nov 19, §7.4e-3)**: a run whose account number is known (`ig.known_user_id`: the record, else the iPhone's backup) makes no lookup call; a limited feed still gives the newest posts from the unscrolled page; a scrolled page stops at posts already here (`Enough`, the visit's `stop`); read usernames with `uname` / `text_of`, never `.lower()` on what Instagram sent. Same
   file names and folders as the iPhone; files tagged "instagram"/"facebook"
   on **both** apps now; options to upscale photos 2× and videos to 1080p (`mac/video_tools.py`,
   `mac/video_helper.swift` = the iPhone's mux/upscale code, ffmpeg fallback). **The profile folder's

@@ -1242,6 +1242,13 @@ what you see (private profiles you follow included), and never fills in a login 
 - **Instagram**: the posts, the posts it's tagged in, its reels, its current stories (into `Stories`) and
   highlights (a folder each) — the same as the iPhone app. Videos come at the best quality offered: when
   Instagram has a sharper version in two halves (picture and sound), they're put together on the Mac.
+  **Checking for new posts asks Instagram as little as it can**: once the profile's folder knows the account's
+  number (from an earlier run on either app) the run goes straight to its posts — no "looking up" step, which
+  is what Instagram limits first. If Instagram says to slow down anyway, the newest posts still come (from the
+  top of the profile page, opened once) and the log says to press Download again in 10–15 minutes for the
+  rest. When posts have to be read from the page itself, scrolling stops as soon as it reaches posts that are
+  already downloaded. If a run ever stops on an error, the details are kept in
+  `~/Library/Logs/Photo Browser for Mac/instagram-downloads.log`.
 - **Facebook**: every album (profile and cover pictures included), every photo it uploaded, **every photo
   it's tagged in** (always — whoever posted it), and its videos. The first run reads every uploaded and
   tagged photo; later runs stop once they reach 12 already downloaded in a row — but only after a run got
