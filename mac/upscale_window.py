@@ -258,7 +258,7 @@ class UpscaleRun(QDialog):
         self._tick.timeout.connect(self._estimate)
         self._tick.start()
         for k in range(self._lanes):
-            threading.Thread(target=self._lane, name=f"ai-upscale-{k + 1}", daemon=True).start()
+            threading.Thread(target=__import__("edit_undo").batched(self._lane, f"upscale-{id(self)}"), name=f"ai-upscale-{k + 1}", daemon=True).start()
 
     def _title(self) -> None:
         n = len(self.photos)

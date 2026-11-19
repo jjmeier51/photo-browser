@@ -490,7 +490,7 @@ def upscale(engine: Engine, path: str, factor: int = FACTOR, *, as_new: bool = F
     if as_new:
         made = batch_crop.write_beside(path, data, NEW_LABEL)
     else:
-        batch_crop.write_in_place(path, data)
+        batch_crop.write_in_place(path, data, label="AI Upscale")
         made = path
     report("save", 1.0)
     return Upscaled(made, *target)

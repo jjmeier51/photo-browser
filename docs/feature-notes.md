@@ -3744,6 +3744,40 @@ Reviews, the top level, a change here beating the backup, off-drive); the window
 highlight and its undo, a click opening a Reviews folder with only bubbles, Show Files, no strip in plain folders,
 View ▸ Show Highlights). **The Swift isn't compiled.**
 
+### 6as Undo for crops and edits on the Mac — `mac/edit_undo.py` (Nov 19, 2026)
+
+"Add an 'undo' button/function for things like cropping, bulk cropping, and editing." Until now Edit ▸ Undo covered
+renames, tags, labels, dates and the Trash; anything that rewrote a photo's pixels in place was final.
+
+- **One hook covers them all.** Every in-place photo change ends in `batch_crop.write_in_place(path, data, label=…)`
+  — Crop…, batch crop, Rotate, the photo editor's Overwrite Original and Update the Edited Copy, Paste Edits, Erase
+  Area / Remove Objects / Remove Watermark with Replace, AI Upscale in place. Before the bytes are replaced,
+  `edit_undo.before_write` copies the photo as it is into `~/Library/Application Support/<app>/Undo` (on the Mac,
+  never the drive), and `after_write` notes the SHA-1 of what was written.
+- **One step per job.** Writes with the same label from the same thread are an `Operation`; a loop over many photos
+  runs inside `edit_undo.batch()` (`batched(work)` as the thread's target — crop window, erase window, Paste Edits,
+  Rotate; the AI upscale's lanes share a named group) so a slow batch stays one step. Without one, a step ends
+  after 8 s with no further write (`QUIET`) — the Remove Watermark window, which saves photo by photo, may make
+  more than one step.
+- **In the window**: `MainWindow._collect_edits` (every 0.5 s) takes finished steps (`drain`) and pushes each on the
+  undo stack — Edit ▸ Undo / ⌘Z says "Undo Crop of 12 Photos" — and the toast gets an **Undo Crop** button (on the
+  feature's own result line when it has just been said).
+- **Undoing** (`restore`, on a thread): each photo's kept bytes go back the way an edit is written (same name,
+  attributes, dates — an in-place edit never changed the dates, so it's byte for byte what it was). A photo that
+  isn't what the edit left any more (SHA-1) — edited again since — is left alone and counted, never overwritten;
+  undo the later edit first and it goes back step by step. The tags the edit added ("cropped", "edited",
+  "retouched", "upscaled") come off where the photo didn't have them before; thumbnails are made again.
+- **Limits**: originals up to 6 GB together (oldest steps' go first; their undo then says the original is no longer
+  kept); everything is cleared at launch, like the undo stack itself. Files in the Mac's temp folder are skipped — the
+  downloaders upscale what they've just fetched there. **Videos**: a rotate is undone by turning it back (lossless);
+  an Upscale Video that replaces isn't kept (gigabytes) — use Save as New for those. Metadata edits aren't covered.
+
+Tested: the engine (a batch = one named step, dates kept, handed out once, a later edit is its own step, a photo
+edited again is left alone, undo in order restores byte for byte, a failed write keeps nothing, two lanes in one
+named batch, the oldest step dropped when the store is full, temp-folder files skipped); the window (Rotate of 3
+through the app's own command → step + toast button; a batch crop tagged "cropped" → ⌘Z puts the crop back and takes
+the tag off; ⌘Z again puts the rotate back: every photo byte for byte with its date).
+
 #### 6aq-2 Export All Frames makes the thumbnails as it goes (Nov 18, 2026)
 
 "When exporting all frames, ensure that the thumbnails are cached as the frames are being exported, so once the

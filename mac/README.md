@@ -388,6 +388,16 @@ HDR photos (a standard picture plus a gain map) show their standard picture, as 
 does the same for what it makes. Thumbnails of HEIC / HEIF / AVIF / JPEG XL photos made before this are
 made again, once, the first time each folder is shown.
 
+### Undo for crops and edits
+
+Edit ▸ **Undo** (⌘Z) now takes back changes to a photo itself: a crop, a batch crop, a rotate, the photo editor's
+Overwrite Original, Paste Edits, Erase Area / Remove Objects / Remove Watermark with Replace, and AI Upscale in
+place. Each job is one step ("Undo Crop of 12 Photos"), and the message at the bottom of the window gets an Undo
+button. The photo goes back exactly as it was — same bytes, same dates — and the tag the edit added comes off. If
+you've edited a photo again since, undo that later edit first. The originals are kept on the Mac until you quit
+(up to 6 GB). Rotated videos are turned back; an upscaled video that replaced its original isn't kept — choose Save
+as New for those.
+
 ### Highlight folders (the iPhone's bubbles)
 
 Folders the iPhone app shows as round highlights now show the same way here: a row of bubbles above a folder's

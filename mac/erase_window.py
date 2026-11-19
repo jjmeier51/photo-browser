@@ -523,7 +523,7 @@ class EraseDialog(QDialog):
                 except Exception as e:  # noqa: BLE001 — one bad photo never stops the rest
                     self._sig.progress.emit(i, path, "failed", f"{type(e).__name__}: {e}")
             self._sig.done.emit()
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=__import__("edit_undo").batched(work), daemon=True).start()
 
     def _progress(self, i: int, path: str, outcome: str, detail: str) -> None:
         if outcome == "done":

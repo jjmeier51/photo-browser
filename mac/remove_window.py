@@ -593,7 +593,7 @@ class RemoveWindow(QDialog):
                 if as_new:
                     out = batch_crop.write_beside(path, data, retouch.NEW_LABEL)
                 else:
-                    batch_crop.write_in_place(path, data)
+                    batch_crop.write_in_place(path, data, label="Remove Objects")
                     out = path
                 sig.saved.emit(out, "new" if as_new else "replace")
             except Exception as e:  # noqa: BLE001 — shown, never a crash

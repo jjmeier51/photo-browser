@@ -181,6 +181,10 @@ actions the app makes no network calls.
   Caches** — macOS empties that when space runs low), kept under 20 GB by `prune_thumbs` (least recently used first,
   daily); folder covers found by scanning and video lengths in `facts.sqlite` (`mac/facts_store.py`, `_Facts(kind=…)`)
   — every key carries a modified time, a cover is re-checked when handed out, "nothing found" is never kept.
+  **In-place photo edits are undoable** (§6as): `batch_crop.write_in_place(path, data, label=…)` keeps the original
+  first (`mac/edit_undo.py`, on the Mac) and the main window turns each finished job into an undo step — so any new
+  in-place edit must go through `write_in_place` with a label, and a loop over many photos inside
+  `edit_undo.batch()` / `batched(work)`.
   **Highlight folders** (the iPhone's bubbles — §6ar): `mac/highlights.py` says which folders are (profile records,
   the iPhone's backup, `folder-options.json` → `highlight` / `reviews`), `mac/highlight_strip.py` draws them above the
   file view (`Pane._load_bubbles`, read off the window's thread); the iPhone shares album highlights and Reviews

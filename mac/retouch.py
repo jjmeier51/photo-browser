@@ -294,5 +294,5 @@ def erase(spec: EraseSpec, path: str, *, as_new: bool = False) -> str:
     data = batch_crop.encode_like(src, out, gain="local")
     if as_new:
         return batch_crop.write_beside(path, data, NEW_LABEL)
-    batch_crop.write_in_place(path, data)
+    batch_crop.write_in_place(path, data, label="Erase Area")
     return path

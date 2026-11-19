@@ -6522,6 +6522,7 @@ class Pane(QWidget):
         one ("Undo", "Show"). Also on the status line, for as long as that holds it."""
         self.status.setText(text)
         self._note_at = time.monotonic()
+        self._note_text = text
         QTimer.singleShot(15000, self.update_status)
         self.toast.show_message(text, action_label, action)
 
@@ -6937,10 +6938,22 @@ class Pane(QWidget):
             self.grid.viewport().update()
             self.list.viewport().update()
             n = len(done)
+            turned = [p for p in done if p in videos]
+            win = self.window()
+            if turned and isinstance(win, MainWindow):     # (the photos' undo comes from edit_undo, by itself)
+                def undo() -> str:
+                    back = [p for p in turned if os.path.isfile(p) and video_tools.rotate(p, -quarters % 4) == "rotated"]
+                    media_info.forget(back)
+                    if THUMBS is not None:
+                        THUMBS.forget(back)
+                    self.grid.viewport().update()
+                    return f"Turned {len(back):,} video{'s' if len(back) != 1 else ''} back."
+                win.undo.push("Rotate" if len(turned) == 1 else f"Rotate of {len(turned):,} Videos", undo)
             self._airdrop_noted(f"Rotated {n:,} item{'s' if n != 1 else ''}." + (f" {len(failed):,} couldn't be." if failed else ""))
             if failed:
                 QMessageBox.warning(self.window(), "Rotate", "Couldn't rotate:\n\n" + "\n".join(failed[:12]))
-        threading.Thread(target=work, daemon=True, name="rotate").start()
+        import edit_undo
+        threading.Thread(target=edit_undo.batched(work), daemon=True, name="rotate").start()
 
     def rename_many(self, paths: list[str]) -> None:
         """Rename N Items… / Rename Files Inside…: a pattern for all of them — numbers, the capture date, the name
@@ -8926,7 +8939,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(app_identity.APP_NAME)
         self.settings = app_identity.settings()
-        self.undo = ui_extras.UndoStack()               # Edit ▸ Undo: renames, tags, Favorites / To AI
+        self.undo = ui_extras.UndoStack()               # Edit ▸ Undo: renames, tags, Favorites / To AI, edits
+        import edit_undo
+        edit_undo.tags_before = lambda p: tag_store().tags(p, fresh=False)   # so an undo takes "cropped" off again
+        self._edits = QTimer(self)                        # photos changed in place → undo steps (edit_undo.py)
+        self._edits.setInterval(500)
+        self._edits.timeout.connect(self._collect_edits)
+        self._edits.start()
         self.show_hidden = str(self.settings.value("showHidden", "false")) == "true"
         self.resize(1320, 820)
         self.setMinimumSize(860, 600)
@@ -9142,6 +9161,53 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(pane.title.text() or app_identity.APP_NAME)
 
     # -- undo, the command palette, help
+    # -- undo for photos changed in place (edit_undo.py): crops, rotates, the editor's Overwrite, erases, upscales
+    def _collect_edits(self) -> None:
+        import edit_undo
+        for op in edit_undo.drain():
+            self._edit_made(op)
+
+    def _edit_made(self, op) -> None:
+        """A finished in-place edit becomes one undo step — Edit ▸ Undo, ⌘Z — and the toast gets its Undo button."""
+        import edit_undo
+        n = len(op.entries)
+        pane = self.active_pane
+
+        def put_back(r) -> None:
+            if r.tags and tag_store() is not None:
+                by_tags: dict[tuple, list[str]] = {}
+                for path, tags in r.tags.items():
+                    if tags:
+                        by_tags.setdefault(tuple(tags), []).append(path)
+                for tags, paths in by_tags.items():
+                    try:
+                        tag_store().remove(paths, list(tags))
+                    except OSError:
+                        pass
+                tags_changed()
+            media_info.forget(r.paths)
+            if THUMBS is not None:
+                THUMBS.forget(r.paths)
+            for p in (self.src, self.dst):
+                p.grid.viewport().update()
+                p.list.viewport().update()
+            for w in list(_VIEWERS):                         # an open viewer shows the photo as it is again
+                if hasattr(w, "reload_current"):
+                    w.reload_current()
+            self.active_pane.note(edit_undo.summary(op, r))
+
+        def undo() -> str:
+            def work() -> None:
+                r = edit_undo.restore(op)
+                QTimer.singleShot(0, self, lambda: put_back(r))
+            threading.Thread(target=work, daemon=True, name="undo-edit").start()
+            return f"Putting {n:,} photo{'s' if n != 1 else ''} back as {'they were' if n != 1 else 'it was'}…"
+
+        item = self.undo.push(op.title(), undo)
+        recent = time.monotonic() - getattr(pane, "_note_at", 0) < 4 and getattr(pane, "_note_text", "")
+        line = recent or f"{op.label}: {n:,} photo{'s' if n != 1 else ''} changed."
+        pane.note(line, f"Undo {op.label}", lambda: self.undo_this(item))
+
     def undo_last(self) -> None:
         said = self.undo.pop_and_undo()
         if said:
@@ -9737,6 +9803,8 @@ def main() -> None:
     global THUMBS
     THUMBS = Thumbnails()
     prune_thumbs_later()                 # the thumbnail folder kept to its size (once a day, in the background)
+    import edit_undo
+    edit_undo.clear()                    # last session's kept originals: its undo steps went with it
     import viewer_surface
     viewer_surface.prepare()             # the viewer's HDR picture (Swift, built once in the background)
     apply_theme(app)

@@ -1336,7 +1336,7 @@ def apply_to_file(path: str, carried: dict, as_new: bool, cancelled: Callable[[]
     data = batch_crop.encode_like(src, im, gain=lambda g: gain_through(g, edit, found))
     if as_new:
         return batch_crop.write_beside(path, data, NEW_LABEL), src.gain_kept
-    batch_crop.write_in_place(path, data)
+    batch_crop.write_in_place(path, data, label="Paste Edits")
     return path, src.gain_kept
 
 

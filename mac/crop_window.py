@@ -447,7 +447,7 @@ class CropDialog(QDialog):
                     err = f"{type(e).__name__}: {e}"
                 self._sig.progress.emit(i, path, err)
             self._sig.done.emit()
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=__import__("edit_undo").batched(work), daemon=True).start()
 
     def _progress(self, i: int, path: str, err: str) -> None:
         if err:

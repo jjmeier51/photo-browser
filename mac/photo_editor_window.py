@@ -2339,12 +2339,12 @@ class EditorWindow(QDialog):
                 data = batch_crop.encode_like(src, im, gain=lambda g: pe.gain_through(g, edit, found))
                 sig.progress.emit(0.95)
                 if pending["as_new"] and pending.get("over"):
-                    batch_crop.write_in_place(pending["over"], data)       # editing again: the edited copy, updated
+                    batch_crop.write_in_place(pending["over"], data, label="Update Edited Copy")   # editing again
                     written = pending["over"]
                 elif pending["as_new"]:
                     written = batch_crop.write_beside(path, data, pe.NEW_LABEL)
                 else:
-                    batch_crop.write_in_place(path, data)
+                    batch_crop.write_in_place(path, data, label="Photo Edit")
                     written = path
                 sig.saved.emit(written, "")
             except Exception as e:  # noqa: BLE001
@@ -2508,7 +2508,7 @@ class PasteRun(QDialog):
         self.stop_btn = _plain("Stop", self.reject)
         row.addWidget(self.stop_btn)
         lay.addLayout(row)
-        threading.Thread(target=self._work, daemon=True).start()
+        threading.Thread(target=__import__("edit_undo").batched(self._work), daemon=True).start()
 
     def _work(self) -> None:
         try:

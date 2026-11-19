@@ -414,8 +414,20 @@ def _fixed_xmp(xmp: bytes, w: int, h: int) -> bytes:
     return put("exif:PixelYDimension|tiff:ImageLength", h, xmp)
 
 
-def write_in_place(path: str, data: bytes) -> None:
-    """Puts `data` in place of the photo's bytes, keeping its name, extended attributes and dates."""
+def write_in_place(path: str, data: bytes, label: str = "Edit") -> None:
+    """Puts `data` in place of the photo's bytes, keeping its name, extended attributes and dates. The bytes it had
+    are kept first, so the change can be undone (edit_undo.py — `label` is what the undo step is called)."""
+    import edit_undo
+    kept = edit_undo.before_write(path, label)
+    try:
+        _replace_bytes(path, data)
+    except BaseException:
+        edit_undo.failed(kept)
+        raise
+    edit_undo.after_write(kept, data)
+
+
+def _replace_bytes(path: str, data: bytes) -> None:
     st = os.stat(path)
     if spare_folders.on_exfat(path):
         with open(path, "r+b") as f:              # in place: no temp file, no rename on exFAT
@@ -526,4 +538,4 @@ def restore_dates(path: str, st: os.stat_result) -> None:
 def apply(spec: CropSpec, path: str) -> None:
     """Turns and crops one photo in place. Raises CropError (or OSError) and leaves it as it was when the
     new photo can't be made; an OSError from the write itself is passed on."""
-    write_in_place(path, render(spec, path))
+    write_in_place(path, render(spec, path), label="Crop" if spec.trims else "Rotate")
