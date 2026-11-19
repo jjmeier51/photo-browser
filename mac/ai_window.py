@@ -283,7 +283,8 @@ class Jobs(QObject):
             def note(text: str) -> None:
                 job.note = text
             job.images = client.generate(job.gen.tune_id, job.prompt, image, job.count, w, h, job.aspect,
-                                         job.resolution, job.gen.token, refs, on_prompt, beat, note)
+                                         job.resolution, job.gen.token, refs, on_prompt, beat, note,
+                                         wait=lambda text: self.progress.emit(job.id, text))
             if len(job.images) < job.count:
                 job.note = (job.note + " " if job.note else "") + \
                     f"Astria returned {len(job.images)} of {job.count} images."

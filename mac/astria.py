@@ -465,6 +465,24 @@ def _multipart(fields: dict[str, str], files: list[tuple[str, str, str, bytes]])
     return out.getvalue(), boundary
 
 
+def _advice(ref: Refusal, tried: int = 1) -> str:
+    """A refusal's message with what to do about it, for the person."""
+    again = f" Tried {tried} times, waiting in between." if tried > 1 else ""
+    log = " Details: " + str(LOGS / "astria-requests.log").replace(str(Path.home()), "~") + "."
+    if ref.kind == "challenge":
+        return (ref.message + again + " It's the network or the number of requests, not the API key — wait 10–15 "
+                "minutes, and turn off a VPN if one is on." + log)
+    if ref.kind == "limited":
+        return ref.message + again + " Wait a few minutes, then send fewer at once." + log
+    if ref.kind == "blocked":
+        return ref.message + " Try another network, or turn a VPN off." + log
+    if ref.kind == "gateway":
+        return ref.message + again + " Try again in a few minutes." + log
+    if ref.kind == "html":
+        return ref.message + log
+    return ref.message
+
+
 def _message(body: bytes) -> str:
     try:
         j = json.loads(body)
@@ -486,6 +504,182 @@ def _message(body: bytes) -> str:
     return body[:300].decode("utf-8", "replace") or "Astria refused the request."
 
 
+@dataclass
+class Refusal:
+    """What a non-2xx answer was. `kind`:
+    "challenge" — Cloudflare (Astria's front door) asked for a browser check; the request never reached Astria;
+    "limited"   — too many requests (429, Cloudflare 1015); never reached Astria;
+    "blocked"   — Cloudflare refused it outright (its 10xx errors); never reached Astria;
+    "too_large" — the upload is bigger than the front door takes (413);
+    "gateway"   — Astria's own servers didn't answer through it (502/503/504/52x, Heroku's error page) — the
+                  request **may** have been taken;
+    "html"      — some other web page where a result belongs;
+    "api"       — Astria's own JSON answer (a validation message, a wrong key…)."""
+    kind: str
+    message: str
+    status: int = 0
+    ray: str = ""
+    retry_after: float | None = None
+
+    @property
+    def wait(self) -> bool:
+        """Waiting and asking again is the right answer (and safe: Astria never saw the request)."""
+        return self.kind in ("challenge", "limited")
+
+
+def _header(headers: dict | None, name: str) -> str:
+    for k, v in (headers or {}).items():
+        if str(k).lower() == name:
+            return str(v)
+    return ""
+
+
+_CF_CODE = re.compile(r"error(?:\s+code)?:?\s*(1\d{3})\b")
+_CF_BLOCKS = {"1006", "1007", "1008", "1009", "1010", "1012", "1020"}
+
+
+def explain(r: Response, sent: int = 0) -> Refusal:
+    """Says what a refused request's answer was (`Refusal`), in words for the person. Until Nov 19 every web page
+    that came back — an upload-too-large page, a gateway timeout, Astria's hosting error page — was reported as
+    "blocked at its Cloudflare check", so the one message covered five different problems with five different
+    answers. Decided from the status, the front door's own headers (`cf-mitigated`, `cf-ray`) and the page."""
+    status = int(r.status or 0)
+    ray = _header(r.headers, "cf-ray")
+    after = None
+    try:
+        after = float(_header(r.headers, "retry-after")) or None
+    except ValueError:
+        after = None
+    where = f" [HTTP {status}" + (f", Cloudflare Ray {ray}" if ray else "") + "]"
+    body = r.body or b""
+    try:
+        j = json.loads(body)
+    except ValueError:
+        j = None
+    if isinstance(j, dict):
+        msg = next((j[k] for k in ("message", "error") if isinstance(j.get(k), str) and j[k].strip()), None)
+        if msg is None and isinstance(j.get("errors"), list) and j["errors"]:
+            msg = str(j["errors"][0])
+        if status == 429:
+            return Refusal("limited", "Astria says this account is sending requests too fast" +
+                           (f" (“{msg}”)" if msg else "") + "." + where, status, ray, after)
+        if status in (401, 403) and not msg:
+            msg = "Astria didn't accept the API key — check it in the AI settings."
+        return Refusal("api", (msg or json.dumps(j)[:300]) + ("" if msg and status < 500 else where), status, ray, after)
+    text = body[:8000].decode("utf-8", "replace").lower()
+    code = (_CF_CODE.search(text) or [None, ""])[1]
+    if status == 429 or code == "1015":
+        return Refusal("limited", "Astria's front door (Cloudflare) says this Mac is sending requests too fast." + where,
+                       status, ray, after)
+    if _header(r.headers, "cf-mitigated").lower() == "challenge" or \
+            any(m in text for m in ("just a moment", "cf-browser-verification", "challenge-platform", "cf-chl",
+                                    "attention required")):
+        return Refusal("challenge", "Astria's front door (Cloudflare) sent its “Just a moment…” browser check, so the "
+                                    "request never reached Astria." + where, status, ray, after)
+    if code in _CF_BLOCKS:
+        return Refusal("blocked", f"Astria's front door (Cloudflare) refused the request outright (its error {code}) "
+                                  "— it is blocking this network or this kind of request, not the API key." + where,
+                       status, ray, after)
+    if status == 413:
+        size = f" ({sent / 1_048_576:.0f} MB)" if sent else ""
+        return Refusal("too_large", f"The upload{size} is larger than Astria's front door accepts — use fewer or "
+                                    "smaller photos." + where, status, ray, after)
+    if status in (502, 503, 504) or 520 <= status <= 527 or "application error" in text:
+        return Refusal("gateway", "Astria's servers didn't answer (the problem is on Astria's side, not this Mac or "
+                                  "the API key)." + where, status, ray, after)
+    if text.lstrip().startswith(("<!doctype", "<html")) or "cloudflare" in text:
+        return Refusal("html", "Astria answered with a web page instead of a result." + where, status, ray, after)
+    return Refusal("api", (body[:300].decode("utf-8", "replace").strip() or "Astria refused the request.") + where,
+                   status, ray, after)
+
+
+def _note_refusal(method: str, url: str, r: Response, ref: Refusal, sent: int) -> None:
+    """A refused request, for ~/Library/Logs/<app>/astria-requests.log — what was asked (never the key: it's a
+    header), the status, the front door's headers and the start of what came back. So a problem that keeps
+    happening can be read afterwards instead of guessed at."""
+    try:
+        LOGS.mkdir(parents=True, exist_ok=True)
+        path = LOGS / "astria-requests.log"
+        if path.exists() and path.stat().st_size > 1_000_000:
+            path.replace(path.with_suffix(".old.log"))
+        heads = {k: _header(r.headers, k) for k in ("server", "cf-ray", "cf-mitigated", "retry-after", "content-type")}
+        start = re.sub(r"\s+", " ", re.sub(r"<(script|style)[\s\S]*?</\1>|<[^>]+>", " ",
+                                           (r.body or b"")[:3000].decode("utf-8", "replace"))).strip()[:400]
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {method} {url.replace(BASE, '')} → HTTP {r.status} "
+                    f"({ref.kind}); sent {sent:,} bytes; " + ", ".join(f"{k}: {v}" for k, v in heads.items() if v)
+                    + f"; body: {start}\n")
+    except OSError:
+        pass
+
+
+class Gate:
+    """Every API call to Astria from this app goes through one of these (`GATE`), whichever thread makes it — four
+    jobs polling, reference photos being prepared, the Astria.ai Browser listing: calls are spaced `SPACING` apart,
+    and once Astria's front door has challenged or rate-limited one (`blocked`), **all** of them hold until the
+    pause it asked for (its Retry-After, else `COOL`, longer each time it happens again) is over. Before this each
+    thread found out for itself and kept asking — polls every 2 s from every job — which is how a pause is turned
+    into a longer one. A quick call (a poll, a listing) doesn't wait out a long pause: it isn't sent and its
+    caller is told "not now" (`wait` → False), as when Astria can't be reached."""
+
+    SPACING = 0.3
+    COOL = (15.0, 30.0, 60.0, 120.0)
+    QUICK = 8.0                          # the longest a quick call waits for its turn
+
+    def __init__(self, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> None:
+        self.sleep, self.clock = sleep, clock
+        self.lock = threading.Lock()
+        self.next_free = 0.0
+        self.cool_until = 0.0
+        self.strikes = 0
+        self.struck_at = -1.0
+        self.why = ""
+
+    def cooling(self) -> float:
+        """Seconds left of a pause Astria asked for (0 when there's none)."""
+        with self.lock:
+            return max(0.0, self.cool_until - self.clock())
+
+    def wait(self, patient: bool) -> float | None:
+        """Waits for this call's turn. → when it may go (the clock), or None: a pause is on that a quick call
+        (`patient` False) shouldn't sit through — don't send it."""
+        with self.lock:
+            now = self.clock()
+            if not patient and self.cool_until - now > self.QUICK:
+                return None
+            at = max(now, self.next_free, self.cool_until)
+            self.next_free = at + self.SPACING
+        if at > now:
+            self.sleep(at - now)
+        return at
+
+    def blocked(self, started: float, retry_after: float | None, why: str) -> float:
+        """A call that started at `started` was challenged / rate-limited. → the seconds everything now waits.
+        Calls already on their way when the pause began don't make it longer (four jobs meet the same check)."""
+        with self.lock:
+            now = self.clock()
+            if started > self.struck_at:
+                self.strikes += 1
+                self.struck_at = now
+                secs = min(retry_after, 300.0) if retry_after else self.COOL[min(self.strikes, len(self.COOL)) - 1]
+                self.cool_until = max(self.cool_until, now + secs)
+                self.why = why
+            return max(0.0, self.cool_until - now)
+
+    def passed(self) -> None:
+        with self.lock:
+            self.strikes = 0
+
+
+GATE = Gate()
+
+
+def pause_note() -> str:
+    """Words for a window when Astria has asked this Mac to wait ("" when it hasn't)."""
+    left = GATE.cooling()
+    return f"Astria asked this Mac to slow down — asking again in {max(1, round(left))} s." if left > 0 else ""
+
+
 def is_picture(data: bytes | None) -> bool:
     if not data or len(data) < 64:
         return False
@@ -505,10 +699,42 @@ _REF_LOCK = threading.Lock()
 
 class Client:
     def __init__(self, key: str | None = None, transport: Transport | None = None,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep, gate: Gate | None = None) -> None:
         self.key = get_key() if key is None else key
         self.t = transport or Transport()
         self.sleep = sleep
+        if gate is None and (transport is not None or sleep is not time.sleep):
+            # A client with its own transport or sleep (tests): its own gate, on a clock that moves only when
+            # it sleeps — so a pause is "waited" at once and nothing leaks between clients.
+            t = [0.0]
+
+            def slept(secs: float) -> None:
+                t[0] += max(0.0, secs)
+                sleep(secs)
+            self.sleep = slept
+            gate = Gate(slept, lambda: t[0])
+        self.gate = gate or GATE
+        self.last_refusal: Refusal | None = None
+
+    def _send(self, method: str, url: str, headers: dict, body: bytes | None, timeout: float,
+              patient: bool = False) -> Response | None:
+        """One API request through the gate. None: not sent — Astria asked for a pause and this call (`patient`
+        False) isn't worth holding for it. A refusal is explained (`last_refusal`), logged, and — when it's the
+        front door saying wait — makes every other call wait too. Raises the transport's PreSend / Ambiguous."""
+        started = self.gate.wait(patient)
+        if started is None:
+            return None
+        r = self.t.send(method, url, headers, body, timeout)
+        if 200 <= r.status < 300:
+            self.gate.passed()
+            self.last_refusal = None
+            return r
+        ref = self.last_refusal = explain(r, len(body or b""))
+        if ref.wait:
+            self.gate.blocked(started, ref.retry_after, ref.message)
+        if not (r.status == 404 and method == "GET"):          # (a prompt asked for the moment it's made)
+            _note_refusal(method, url, r, ref, len(body or b""))
+        return r
 
     @property
     def configured(self) -> bool:
@@ -521,10 +747,10 @@ class Client:
 
     def _get_json(self, path: str, timeout: float = 30):
         try:
-            r = self.t.send("GET", BASE + path, self._headers(), None, timeout)
+            r = self._send("GET", BASE + path, self._headers(), None, timeout)
         except (Transport.PreSend, Transport.Ambiguous):
             return None
-        if not 200 <= r.status < 300:
+        if r is None or not 200 <= r.status < 300:
             return None
         try:
             return json.loads(r.body)
@@ -545,14 +771,24 @@ class Client:
         self.sleep(secs)
 
     # -- creating a prompt
-    def create_prompt(self, tune: int, fields: dict[str, str], files: list) -> int:
+    def create_prompt(self, tune: int, fields: dict[str, str], files: list,
+                      wait: Callable[[str], None] | None = None) -> int:
+        """Creates the prompt → its id. Survives (the iPhone's `createPrompt`, plus, Nov 19):
+        * the front door saying wait (a Cloudflare check, "too many requests") — Astria never saw the request, so
+          it's sent again once the pause is over (`Gate`), up to four times, `wait` told each time;
+        * Astria's servers not answering (502/503/504/52x) — the request **may** have been taken, so the tune's
+          newest prompts are looked through before anything is sent again: a job is never made (and paid for) twice."""
         body, boundary = _multipart(fields, files)
         text = fields.get("prompt[text]", "")
         for attempt in range(1, 5):
             started = time.time()
+            left = self.gate.cooling()
+            if left > 1 and wait:
+                wait(f"Astria asked this Mac to wait — sending in {round(left)} s (try {attempt} of 4)…")
             try:
-                r = self.t.send("POST", f"{BASE}/tunes/{tune}/prompts",
-                                self._headers({"Content-Type": f"multipart/form-data; boundary={boundary}"}), body, 180)
+                r = self._send("POST", f"{BASE}/tunes/{tune}/prompts",
+                               self._headers({"Content-Type": f"multipart/form-data; boundary={boundary}"}), body, 180,
+                               patient=True)
             except Transport.PreSend:
                 if attempt == 4:
                     raise AIError("network")
@@ -574,11 +810,42 @@ class Client:
                 if pid is None:
                     raise AIError("bad_result")
                 return pid
-            if self._transient(r.status) and attempt < 4:
-                self._backoff(attempt, (r.headers or {}).get("Retry-After"))
+            ref = self.last_refusal or explain(r, len(body))
+            if ref.wait:
+                if attempt < 4:
+                    continue                                 # the gate holds the next try until the pause is over
+                raise AIError("server", _advice(ref, tried=4))
+            if ref.kind == "gateway":
+                found = self.find_recent_prompt(tune, text, started - 30)
+                if isinstance(found, int):
+                    return found                             # it was taken after all
+                if attempt == 4:
+                    raise AIError("server", _advice(ref, tried=4))
+                self._backoff(attempt, _header(r.headers, "retry-after"))
+                if found == "unavailable":                   # can't tell yet: look once more before sending again
+                    found = self.find_recent_prompt(tune, text, started - 30)
+                    if isinstance(found, int):
+                        return found
+                    if found == "unavailable":
+                        raise AIError("network")             # don't risk a second job
                 continue
-            raise AIError("server", _message(r.body))
+            if self._transient(r.status) and attempt < 4:
+                self._backoff(attempt, _header(r.headers, "retry-after"))
+                continue
+            raise AIError("server", _advice(ref))
         raise AIError("network")
+
+    def _post_tune(self, body: bytes, boundary: str, timeout: float) -> Response:
+        """POST /tunes, sent again (up to three times) only when the front door said wait — a request it turned
+        away never reached Astria, so nothing is made twice. Raises the transport's errors."""
+        r = None
+        for _attempt in range(3):
+            r = self._send("POST", f"{BASE}/tunes",
+                           self._headers({"Content-Type": f"multipart/form-data; boundary={boundary}"}), body, timeout,
+                           patient=True)
+            if 200 <= r.status < 300 or not (self.last_refusal and self.last_refusal.wait):
+                break
+        return r
 
     def find_recent_prompt(self, tune: int, text: str, since: float):
         arr = self._get_json(f"/tunes/{tune}/prompts?limit=20")
@@ -648,7 +915,7 @@ class Client:
         with ThreadPoolExecutor(max_workers=4) as pool:
             tick = last_growth = 0
             while tick < max_ticks and not (stop is not None and stop.is_set()):
-                self.sleep(2 if tick < 15 else 4 if tick < 60 else 6)
+                self.sleep(3 if tick < 15 else 4 if tick < 60 else 6)
                 tick += 1
                 if heartbeat:
                     heartbeat(sum(1 for f in futures.values() if f.done() and f.result()), want)
@@ -741,8 +1008,7 @@ class Client:
         body, boundary = _multipart(fields, [("tune[images][]", f"img{i}.jpg", "image/jpeg", d)
                                              for i, d in enumerate(images)])
         try:
-            r = self.t.send("POST", f"{BASE}/tunes",
-                            self._headers({"Content-Type": f"multipart/form-data; boundary={boundary}"}), body, 600)
+            r = self._post_tune(body, boundary, 600)
         except Transport.PreSend:
             raise AIError("network")
         except Transport.Ambiguous:
@@ -750,7 +1016,9 @@ class Client:
             raise AIError("server", "the connection dropped while the photos were going up — look on astria.ai "
                                     "before trying again, the model may already be training")
         if not 200 <= r.status < 300:
-            raise AIError("server", _message(r.body))
+            ref = self.last_refusal or explain(r, len(body))
+            raise AIError("server", _advice(ref) + (" Look on astria.ai before trying again — the model may already "
+                                                    "be training." if ref.kind == "gateway" else ""))
         try:
             tid = _int(json.loads(r.body).get("id"))
         except (ValueError, AttributeError):
@@ -769,12 +1037,11 @@ class Client:
                   "tune[model_type]": "faceid", "tune[base_tune_id]": str(base_tune)}
         body, boundary = _multipart(fields, [("tune[images][]", "reference.jpg", "image/jpeg", data)])
         try:
-            r = self.t.send("POST", f"{BASE}/tunes",
-                            self._headers({"Content-Type": f"multipart/form-data; boundary={boundary}"}), body, 120)
+            r = self._post_tune(body, boundary, 120)
         except (Transport.PreSend, Transport.Ambiguous):
             raise AIError("network")
         if not 200 <= r.status < 300:
-            raise AIError("server", _message(r.body))
+            raise AIError("server", _advice(self.last_refusal or explain(r, len(body))))
         try:
             j = json.loads(r.body)
         except ValueError:
@@ -799,7 +1066,9 @@ class Client:
                  token: str | None = None, references: list[tuple[bytes, str, str]] | None = None,
                  on_prompt: Callable[[int], None] | None = None,
                  heartbeat: Callable[[int, int | None], None] | None = None,
-                 note: Callable[[str], None] | None = None, stop: threading.Event | None = None) -> list[bytes]:
+                 note: Callable[[str], None] | None = None, stop: threading.Event | None = None,
+                 wait: Callable[[str], None] | None = None) -> list[bytes]:
+        """`wait`: told (a line for the job's status) when Astria has asked this Mac to pause before sending."""
         if not self.configured:
             raise AIError("not_configured")
         text = prompt.strip()
@@ -825,7 +1094,7 @@ class Client:
             fields["prompt[resolution]"] = resolution
         files = [("prompt[input_image]", "input.jpg", "image/jpeg", image)] if image else []
         try:
-            pid = self.create_prompt(tune, fields, files)
+            pid = self.create_prompt(tune, fields, files, wait)
         except AIError as e:
             if e.kind == "server" and reused:               # a remembered reference tune may be gone on Astria
                 store().update("reference_tunes", lambda d: {k: v for k, v in (d or {}).items() if k not in reused})

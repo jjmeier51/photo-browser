@@ -242,6 +242,10 @@ actions the app makes no network calls.
   (`TaylorRecord.swift`) — §7.4c.
   Photo Browser for Mac's **Edit with AI / Create with AI / Astria.ai Browser** (`mac/astria.py`, `mac/ai_window.py`): the
   iPhone's Astria request path field for field (keep the two in step), key in the Mac's Keychain — §1.13.
+  **Every Astria API call goes through `Client._send`** (never `self.t.send` to `BASE` directly): one `Gate` spaces
+  them and holds them all when Astria's front door says wait; a refusal is named by `explain()` (a real Cloudflare
+  check ≠ rate limit ≠ 413 ≠ gateway timeout ≠ Astria's JSON) and logged to `astria-requests.log`; a POST is sent
+  again only when it can't have reached Astria (after a gateway answer, `find_recent_prompt` first) — §1.13-b.
   **Save / Save All and Run Again close the results window** (said in a toast; kept-but-unsaved results are asked
   about once on Run Again, `ai/run_again_unsaved`).
   **Several photos, one prompt** (select photos ▸ Edit N Photos with AI…): a job per photo with the same prompt and

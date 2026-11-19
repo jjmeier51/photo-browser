@@ -458,6 +458,45 @@ as for a typed prompt (the FaceID reference mentions are prepended by `AIExtend`
 
 ---
 
+#### 1.13-b "Blocked at its Cloudflare check", again and again (Mac, Nov 19, 2026)
+
+The Mac showed "Astria's service blocked the request at its Cloudflare check (a "Just a moment…" page came back …)
+check the API key" repeatedly. What was found, in `mac/astria.py`:
+
+- **The message was a catch-all.** `_message` said it for *any* answer that wasn't JSON: a real Cloudflare browser
+  check, but also its rate-limit page (error 1015), its outright block (1020), "413 Request Entity Too Large",
+  a gateway timeout (502/504/52x) and Astria's hosting error page (Heroku's "Application Error", 503). Five problems
+  with five different answers, one message — and the advice ("check the API key") was wrong for all of them: one
+  unauthenticated request from here showed a missing/wrong key gets Astria's own JSON 401 straight through
+  Cloudflare, to Python's urllib with the app's User-Agent, even from a datacentre address. So the front door does
+  not turn this client away as such; a check that keeps coming is about the network (a VPN/proxy) or the number of
+  requests.
+- **Nothing backed off together.** Every job polled on its own clock (four at once, every 2 s), reference photos
+  became one `POST /tunes` each, the Astria.ai Browser answered a failed first page by listing every model's
+  prompts "the long way round" — dozens of requests — and a refused poll just came back `None` and was asked again
+  2 s later. Whatever started a pause, the app kept knocking through it.
+
+Now: `explain(response)` → a `Refusal` (`challenge` / `limited` / `blocked` / `too_large` / `gateway` / `html` /
+`api`) from the status, `cf-mitigated` / `cf-ray` / `Retry-After` and the page, each with its own words (and the
+Ray number); every refused request is a line in `~/Library/Logs/<app>/astria-requests.log` (method, path, status,
+kind, the front door's headers, the start of the page — never the key). All API calls go through `Client._send` and
+one process-wide `Gate` (`GATE`): 0.3 s apart whatever the thread, and after a `challenge` / `limited` answer
+**everything** holds for the pause asked (Retry-After, else 15 → 30 → 60 → 120 s; calls already on their way when
+it began don't lengthen it; any success resets it). Quick calls (polls, listings) aren't sent during a pause longer
+than 8 s — they return "not now" as an unreachable Astria does. `create_prompt` / the tune POSTs are sent again
+after the pause (up to four / three times — a request the front door turned away never reached Astria), the job's
+status line saying so (`generate(..., wait=)`). A **gateway** answer is different: Astria may have taken the
+request, so the tune's newest prompts are looked through first and nothing is posted twice (the iPhone still
+re-posts on any 5xx — worth porting). The browser says what the pause is instead of going the long way round.
+First polls are 3 s apart (were 2).
+
+Deliberately not done: making the app look like a web browser to Cloudflare. Astria's API is for programs and
+answers this one; if a network is being checked, the answer is waiting, another network, or Astria (with the Ray
+number).
+
+Tests: `astria_cf/t.py` in the session scratchpad (scripted answers). Not run against Astria beyond the single
+unauthenticated request above. The iPhone's `AIExtend.message(from:)` still has the old catch-all wording.
+
 ## 2. Find Duplicates — `DuplicatesView.swift`, `PerceptualHash.swift`
 
 Non-recursive scan of one folder. Three **independent** match kinds (never chained across each

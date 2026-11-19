@@ -810,6 +810,13 @@ class BrowserWindow(QWidget):
                         return
                     page = c.prompt_page(offset, PAGE)
                     if page is None:
+                        ref = getattr(c, "last_refusal", None)
+                        if A.pause_note() or (ref is not None and ref.kind in ("challenge", "limited", "blocked",
+                                                                                "gateway")):
+                            # Astria's front door said wait (or its servers are down): asking the long way round
+                            # would be dozens more requests into the same wall — say so instead.
+                            bridge.listing_failed.emit((A.pause_note() or ref.message) + " Reload in a moment.")
+                            return
                         if offset == 0:                    # the account-wide listing isn't there: the long way round
                             everything = c.list_prompts()
                             bridge.page.emit(everything, 0, False)

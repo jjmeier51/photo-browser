@@ -1587,6 +1587,14 @@ sent anywhere, and then only the photo you're editing and any reference photos y
 the Mac's Keychain (every AI window asks for it the first time; **Astria Settings…** changes it, the default
 model and the models' tune ids).
 
+- **When Astria says wait.** If Astria's front door (Cloudflare) checks or rate-limits a request, the whole app
+  pauses its Astria requests for as long as asked, the job's status says "Astria asked this Mac to wait —
+  sending in 30 s", and it's sent again by itself (up to four times). If it still fails, the message says what
+  actually came back — a Cloudflare check, a rate limit, an upload that's too large, Astria's servers not
+  answering, or Astria's own refusal — with its reference number, and every refused request is kept in
+  `~/Library/Logs/Photo Browser for Mac/astria-requests.log`. A check that keeps coming back is about the
+  network (try without a VPN) or too many requests in a short time, not the API key — a wrong key gets its own
+  message.
 - **Edit with AI** — right-click a photo. Write what to change (an optional negative prompt goes along in
   the text, as on the iPhone); the prompting reminder, the two reusable prompts (Use / Copy) and your recent
   prompts (double-click to reuse; right-click to ♥ one — hearted prompts are never dropped) are right there.
