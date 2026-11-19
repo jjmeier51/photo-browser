@@ -4176,6 +4176,7 @@ class Pane(QWidget):
     location_changed = Signal(str)
     selection_changed = Signal()
     airdrop_note = Signal(str)           # lines from the AirDrop thread → the status line
+    _bubbles_found = Signal(str, object, object)   # (folder, highlights.Listing, {path: mtime}) from its reading thread
 
     def __init__(self, role: str, settings: QSettings, views: FolderViews | None = None) -> None:
         super().__init__()
@@ -4397,6 +4398,21 @@ class Pane(QWidget):
         hdr.setSortIndicatorShown(True)
         hdr.sortIndicatorChanged.connect(self._header_sort)
         self._layout_header()
+        # The folder's highlights — the iPhone app's bubbles — above its files (highlights.py, highlight_strip.py).
+        import highlight_strip
+        self.bubbles = highlight_strip.HighlightStrip(folder_picture, lambda: THEME)
+        self.bubbles.opened.connect(self.go)
+        self.bubbles.menu_wanted.connect(self._bubble_menu)
+        self.bubbles.files_toggled.connect(self._review_files)
+        self.bubbles.hide()
+        self._bubbles_found.connect(self._show_bubbles, Qt.ConnectionType.QueuedConnection)
+        self._bubbles_soon = QTimer(self)                  # the folder changed: its bubbles are read again, once
+        self._bubbles_soon.setSingleShot(True)
+        self._bubbles_soon.setInterval(600)
+        self._bubbles_soon.timeout.connect(self._load_bubbles)
+        self.fs.directoryLoaded.connect(lambda p: self._bubbles_soon.start() if p == self.location else None)
+        self.review_files = False                          # a Reviews folder's ordinary listing shown too
+        root.addWidget(self.bubbles)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.grid)
         self.stack.addWidget(self.list)
@@ -5106,6 +5122,7 @@ class Pane(QWidget):
             born = birthdays.default(self.settings).own(path)
             menu.addAction(f"Birthday: {time.strftime('%-d %b %Y', time.localtime(born))}…" if born else "Set Birthday…",
                            lambda: self.set_birthday(path))
+            self._highlight_menu(menu, path)
             menu.addAction("Choose Cover…", lambda: self.choose_cover(path))
             if folder_covers.default(self.settings).cover(path) is not None:
                 menu.addAction("Remove Cover", lambda: self.remove_cover(path))
@@ -5251,6 +5268,9 @@ class Pane(QWidget):
         self.model.root_path = path
         self._restore_view()
         self._apply_videos_first()
+        self.review_files = False
+        self._hide_bubbles()                               # (the new folder's are read off this thread)
+        self._load_bubbles()
         if THUMBS is not None:
             THUMBS.new_listing()
         idx = self.model.mapFromSource(self.fs.setRootPath(path))
@@ -5354,6 +5374,7 @@ class Pane(QWidget):
             self.history.append(self.location)
             self.future.clear()
         self.location = loc
+        self._hide_bubbles()
         self._stop_scan()
         self.results.clear_all()
         if self.model.sourceModel() is not self.results:
@@ -6505,6 +6526,160 @@ class Pane(QWidget):
         self.toast.show_message(text, action_label, action)
 
     # -- what an empty view says
+    # -- highlights (highlights.py): the iPhone app's bubble folders
+    def bubbles_on(self) -> bool:
+        return str(self.settings.value("highlights/show", "true")) != "false"
+
+    def _hide_bubbles(self) -> None:
+        self.bubbles.hide()
+        self.stack.show()
+
+    def _load_bubbles(self) -> None:
+        """Which of this folder's folders are highlights — read on a thread (it looks into each for a profile's
+        record, and may read the iPhone's backup), shown by `_show_bubbles`."""
+        path = self.location
+        if not path or self.is_virtual or not self.bubbles_on():
+            self._hide_bubbles()
+            return
+        settings = self.settings
+
+        def work() -> None:
+            import highlights
+            try:
+                listing = highlights.default(settings).listing(path)
+                mtimes = {}
+                for b in listing.bubbles:
+                    try:
+                        mtimes[b.path] = int(os.stat(b.path).st_mtime)
+                    except OSError:
+                        pass
+            except Exception:  # noqa: BLE001 — no bubbles is the worst that happens
+                listing, mtimes = None, {}
+            self._bubbles_found.emit(path, listing, mtimes)
+        threading.Thread(target=work, daemon=True, name="highlights").start()
+
+    def _show_bubbles(self, path: str, listing, mtimes) -> None:
+        if path != self.location or self.is_virtual:
+            return
+        if listing is None or not (listing.bubbles or listing.reviews) or not self.bubbles_on():
+            self._hide_bubbles()
+            return
+        same = (self.bubbles.isVisible() and self.bubbles.reviews == listing.reviews
+                and self.bubbles.paths() == [b.path for b in listing.bubbles])
+        if not same:
+            self.bubbles.set_listing(listing.bubbles, listing.reviews, mtimes, self.review_files)
+        self.bubbles.show()
+        # A Reviews folder shows only its highlight folders, as on the iPhone — unless Show Files is on.
+        self.stack.setVisible(not listing.reviews or self.review_files)
+
+    def _review_files(self, on: bool) -> None:
+        self.review_files = bool(on)
+        self.stack.setVisible(bool(on) or not self.bubbles.reviews)
+
+    def set_bubbles_on(self, on: bool) -> None:
+        """View ▸ Show Highlights."""
+        self.settings.setValue("highlights/show", "true" if on else "false")
+        for w in QApplication.topLevelWidgets():
+            for pane in w.findChildren(Pane):
+                pane._load_bubbles()
+
+    def _highlights_changed(self) -> None:
+        for w in QApplication.topLevelWidgets():
+            for pane in w.findChildren(Pane):
+                pane._load_bubbles()
+
+    def highlight_state(self, folder: str) -> str:
+        """"album" (a highlight the person made), "fixed" (a profile's folder or one of Instagram's highlights —
+        a bubble by what it is), or "" (a plain folder)."""
+        import highlights
+        h = highlights.default(self.settings)
+        if h.profile_kind(folder) or h.profile_kind(os.path.dirname(folder)) == "instagram":
+            return "fixed"
+        return "album" if h.is_album_highlight(folder) else ""
+
+    def set_highlight(self, folder: str, on: bool) -> None:
+        """Turn into Album Highlight / Remove from Highlights: the folder shown as a bubble above its parent's
+        files — here and on the iPhone (the drive's folder-options.json)."""
+        import highlights
+        h = highlights.default(self.settings)
+        name = os.path.basename(folder.rstrip("/")) or folder
+        try:
+            h.set_album_highlight(folder, on)
+        except OSError as e:
+            QMessageBox.warning(self.window(), "Highlights", f"Couldn't save it to the drive: {e.strerror or e}")
+            return
+        self._highlights_changed()
+
+        def undo() -> str:
+            h.set_album_highlight(folder, not on)
+            self._highlights_changed()
+            return f"“{name}” is {'a plain folder' if on else 'a highlight'} again."
+        self._undoable("Turn into Album Highlight" if on else "Remove from Highlights", undo,
+                       f"“{name}” is a highlight — a bubble above “{os.path.basename(os.path.dirname(folder)) or 'its folder'}”, "
+                       "here and on the iPhone." if on else f"“{name}” is a plain folder again.")
+
+    def is_reviews(self, folder: str) -> bool:
+        import highlights
+        return highlights.default(self.settings).is_reviews(folder)
+
+    def set_reviews(self, folder: str, on: bool) -> None:
+        """Reviews Folder: every folder inside is shown as a large highlight, and nothing else — the iPhone's."""
+        import highlights
+        h = highlights.default(self.settings)
+        name = os.path.basename(folder.rstrip("/")) or folder
+        try:
+            h.set_reviews(folder, on)
+        except OSError as e:
+            QMessageBox.warning(self.window(), "Reviews Folder", f"Couldn't save it to the drive: {e.strerror or e}")
+            return
+        self._highlights_changed()
+
+        def undo() -> str:
+            h.set_reviews(folder, not on)
+            self._highlights_changed()
+            return f"“{name}” is as it was."
+        self._undoable("Reviews Folder", undo,
+                       f"“{name}” is a Reviews folder — every folder in it shows as a highlight." if on
+                       else f"“{name}” is an ordinary folder again.")
+
+    def new_reviews_folder(self) -> None:
+        """File ▸ New Reviews Folder…: a new folder here that holds only highlight folders (the iPhone's)."""
+        if not self.location or self.is_virtual:
+            return
+        name, ok = QInputDialog.getText(self, "New Reviews Folder", "Name of the Reviews folder:", text="Reviews")
+        if not ok or not name.strip():
+            return
+        target = Path(self.location) / safe_name(name.strip())
+        if not target.exists():
+            try:
+                spare_folders.make_dir(str(target))
+            except OSError as e:
+                QMessageBox.warning(self, "New Reviews Folder", f"Couldn't create the folder: {e}")
+                return
+        self.set_reviews(str(target), True)
+        QTimer.singleShot(0, lambda: self.go(str(target)))
+
+    def _bubble_menu(self, folder: str, where) -> None:
+        menu = QMenu(self)
+        menu.addAction("Open", lambda: self.go(folder))
+        menu.addAction("Show in the List", lambda: self.reveal(folder))
+        menu.addSeparator()
+        self._highlight_menu(menu, folder)
+        menu.addAction("Choose Cover…", lambda: self.choose_cover(folder))
+        menu.exec(where)
+
+    def _highlight_menu(self, menu: QMenu, folder: str) -> None:
+        state = self.highlight_state(folder)
+        if state == "album":
+            menu.addAction("Remove from Highlights", lambda: self.set_highlight(folder, False))
+        elif state == "":
+            a = menu.addAction("Turn into Album Highlight", lambda: self.set_highlight(folder, True))
+            a.setToolTip("Shown as a bubble above its folder's files — here and on the iPhone")
+        r = menu.addAction("Reviews Folder", lambda: self.set_reviews(folder, not self.is_reviews(folder)))
+        r.setCheckable(True)
+        r.setChecked(self.is_reviews(folder))
+        r.setToolTip("Every folder inside it is shown as a large highlight")
+
     def _dir_loaded(self, path: str) -> None:
         if path == self.location:
             self._loaded_dir = path
@@ -8840,7 +9015,8 @@ class MainWindow(QMainWindow):
         self._panel_soon.setSingleShot(True)
         self._panel_soon.setInterval(200)
         self._panel_soon.timeout.connect(self._show_progress)
-        THUMBS.ready.connect(lambda: (self.src.grid.viewport().update(), self.dst.grid.viewport().update()))
+        THUMBS.ready.connect(lambda: (self.src.grid.viewport().update(), self.dst.grid.viewport().update(),
+                                      self.src.bubbles.refresh(), self.dst.bubbles.refresh()))
         for f in facts():                                  # video lengths, folder covers (the Photos view)
             f.ready.connect(lambda: (self.src.grid.viewport().update(), self.dst.grid.viewport().update()))
         tag_events().changed.connect(self._tags_changed)

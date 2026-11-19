@@ -3705,6 +3705,45 @@ subscribed account; if it still finds nothing, the saved `facebook-hub-*.json` h
   (least recently used out, under the limit nothing); the Caches folder moved to Application Support; the window
   storing a cover.
 
+### 6ar Highlight folders on the Mac — `mac/highlights.py`, `mac/highlight_strip.py`, `FolderOptions.swift` (Nov 19, 2026)
+
+"Look into the 'highlight' folders in the iOS app and see how they can best be implemented in the Mac app."
+
+**What they are on the iPhone** (`FolderView`): some folders are drawn as round **bubbles** above a folder's grid
+instead of as tiles — `isBubbleFolder`: a downloaded profile's folder (Instagram, Facebook, TikTok, OF), an Instagram
+profile's highlight folders ("Stories", one per highlight — `instagramHighlights`), and any folder the person turned
+into an **album highlight** (`albumHighlights`, long-press ▸ Turn into Album Highlight). A **Reviews folder**
+(`reviewsFolders`) shows nothing but its subfolders as large bubbles. Order: Stories, the profiles, then the order
+dragged (`bubbleOrders`), A–Z at Home. All of it lived on the phone (`FilePrefs`) and in its drive backup only.
+
+**The Mac's version.**
+- **Which folders** (`highlights.Highlights.listing`, off the window's thread): profile folders by their shared record
+  file (`.instagram.json` / `.facebook.json` / `.tiktok.json`), else the iPhone's backup
+  (`.Photo Browser Metadata/metadata.json`); Instagram highlights = the backup's, and any folder directly inside an
+  Instagram profile folder (not DUPLICATES / AI / Screenshots / "… Frames"); album highlights and Reviews folders from
+  the drive's `folder-options.json` (`highlight`, `reviews` — the Videos-at-the-Top file, same ± stamps), else the
+  backup. So the phone's existing highlights show on the Mac today, and a choice made since wins over the backup
+  (that's how Remove from Highlights sticks). Off a drive: the Mac's settings.
+- **How they look** (`HighlightStrip`, painted, in the pane above the file view): the folder's cover (the shared
+  folder covers) in a ring — warm gradient, Facebook blue, TikTok cyan→red — with the label (`@handle` / the profile's
+  name / the folder's name). One line when they fit, two at most (it scrolls). A click opens; right-click: Open, Show
+  in the List, Remove from Highlights, Reviews Folder, Choose Cover…. The folders stay in the file list too — it is a
+  file manager: nothing a list shows should go missing. A Reviews folder shows large bubbles and nothing else, with
+  **Show Files** for the ordinary listing.
+- **Making them**: right-click a folder ▸ Turn into Album Highlight / Remove from Highlights / Reviews Folder; File ▸
+  New Reviews Folder…; the same in the menu bar; View ▸ Show Highlights turns the strip off. All undoable.
+- **Shared both ways**: `FolderOptions.swift` now reads and writes all three choices (`readAll` / `writeAll`, other
+  keys kept), `Library.albumHighlightStamps` / `reviewsStamps` (path → ± stamp; a mark older than the stamps counts as
+  on at time 1) are stamped in `setAlbumHighlight` / `setReviewsFolder`, re-keyed, moved and pruned with the rest, and
+  `syncFolderOptions` merges them in and out. **Any new setter of these on the iPhone must stamp them.**
+- **Not done**: dragging bubbles into an order on the Mac (the phone's order is followed from its backup); telling the
+  iPhone that a folder the *Mac* downloaded is an Instagram highlight (its reconnect does that).
+
+Tested on the Mac side: the listing rules (profiles by record and by backup, order, labels, Instagram's highlights,
+Reviews, the top level, a change here beating the backup, off-drive); the window (strip above the files, a new
+highlight and its undo, a click opening a Reviews folder with only bubbles, Show Files, no strip in plain folders,
+View ▸ Show Highlights). **The Swift isn't compiled.**
+
 #### 6aq-2 Export All Frames makes the thumbnails as it goes (Nov 18, 2026)
 
 "When exporting all frames, ensure that the thumbnails are cached as the frames are being exported, so once the

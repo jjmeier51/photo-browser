@@ -1,9 +1,12 @@
-"""Per-folder choices shared with the iPhone app — so far one: **Videos at the Top** (a folder's videos listed
-before its photos and other files; folders still first).
+"""Per-folder choices shared with the iPhone app: **Videos at the Top** (`videos_first` — a folder's videos listed
+before its photos and other files; folders still first), **album highlight** (`highlight` — the folder shown as a
+bubble in its parent) and **Reviews folder** (`reviews` — every folder inside it shown as a large bubble); the last
+two are highlights.py's.
 
 Where a choice lives:
 - **On the drive**, for a folder on a drive the iPhone app has opened (one with `.Photo Browser Metadata`):
-  `<drive>/.Photo Browser Metadata/folder-options.json` — `{"videos_first": {"<folder, drive-relative>": stamp}}`.
+  `<drive>/.Photo Browser Metadata/folder-options.json` — `{"videos_first": {"<folder, drive-relative>": stamp},
+  "highlight": {…}, "reviews": {…}}`.
   The iPhone app reads and writes the same file (`FolderOptions.swift`), so a folder set here is shown that way
   there, and the other way round.
 - **In Photo Browser for Mac's settings**, for any other folder (on the Mac, or a drive the app has never opened), by its
@@ -59,12 +62,16 @@ def _rel(base: str, folder: str) -> str:
     return "" if rel == "." else unicodedata.normalize("NFC", rel)
 
 
+OPTIONS = ("videos_first", "highlight", "reviews")       # the keys in the file (each: {folder: stamp})
+
+
 class FolderOptions:
     """`settings`: a QSettings (or anything with value/setValue) for folders that aren't on such a drive."""
 
     def __init__(self, settings=None) -> None:
         self.settings = settings
-        self._files: dict[str, tuple[tuple[int, int] | None, dict[str, float]]] = {}     # base → (stamp of the file, entries)
+        # base → (stamp of the file, {option: {folder: stamp}})
+        self._files: dict[str, tuple[tuple[int, int] | None, dict[str, dict[str, float]]]] = {}
         self._unreadable: set[str] = set()             # bases whose shared file was there but couldn't be read
         self._extra: dict[str, dict] = {}              # base → keys in the file this version doesn't know (kept on writing)
         self._bases: dict[str, tuple[float, str | None]] = {}
@@ -85,8 +92,8 @@ class FolderOptions:
     def _path(base: str) -> Path:
         return Path(base) / METADATA / FILE_NAME
 
-    def _read(self, base: str) -> dict[str, float]:
-        """The drive's entries — read again only when the file has changed."""
+    def _read(self, base: str) -> dict[str, dict[str, float]]:
+        """The drive's entries, by option — read again only when the file has changed."""
         file = self._path(base)
         try:
             st = os.stat(file)
@@ -96,25 +103,31 @@ class FolderOptions:
         hit = self._files.get(base)
         if hit and hit[0] == stamp:
             return hit[1]
-        entries: dict[str, float] = {}
+        entries: dict[str, dict[str, float]] = {o: {} for o in OPTIONS}
         if stamp is not None:
             import net_fetch
             doc, how = net_fetch.load_json(file)            # a torn file is read from its .bak, never taken for "nothing set"
             if how == "corrupt":
                 self._unreadable.add(base)
-            raw = doc.get("videos_first") if doc.get("format") == FORMAT else None
-            if isinstance(raw, dict):
-                entries = {str(k): float(v) for k, v in raw.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
-            self._extra[base] = {k: v for k, v in doc.items() if k not in ("format", "version", "updated", "by", "videos_first")}
+            if doc.get("format") == FORMAT:
+                for o in OPTIONS:
+                    raw = doc.get(o)
+                    if isinstance(raw, dict):
+                        entries[o] = {unicodedata.normalize("NFC", str(k)): float(v) for k, v in raw.items()
+                                      if isinstance(v, (int, float)) and not isinstance(v, bool)}
+            self._extra[base] = {k: v for k, v in doc.items()
+                                 if k not in ("format", "version", "updated", "by", *OPTIONS)}
         self._files[base] = (stamp, entries)
         return entries
 
-    def _write(self, base: str, entries: dict[str, float]) -> None:
+    def _write(self, base: str, entries: dict[str, dict[str, float]]) -> None:
         import spare_folders
         file = self._path(base)
         doc = {**self._extra.get(base, {}),                 # (what a later version of either app put there stays)
-               "format": FORMAT, "version": 1, "updated": round(time.time(), 3), "by": app_identity.APP_NAME,
-               "videos_first": {k: entries[k] for k in sorted(entries)}}
+               "format": FORMAT, "version": 1, "updated": round(time.time(), 3), "by": app_identity.APP_NAME}
+        for o in OPTIONS:
+            if entries.get(o) or o == "videos_first":
+                doc[o] = {k: entries[o][k] for k in sorted(entries.get(o, {}))}
         data = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         try:                                                # what's there now: kept as .bak (or .damaged) first
             import net_fetch
@@ -136,70 +149,92 @@ class FolderOptions:
                 os.fsync(f.fileno())
             os.replace(tmp, file)
         st = os.stat(file)
-        self._files[base] = ((st.st_mtime_ns, st.st_size), dict(entries))
+        self._files[base] = ((st.st_mtime_ns, st.st_size), {o: dict(entries.get(o, {})) for o in OPTIONS})
 
-    def _local(self) -> dict[str, float]:
+    @staticmethod
+    def _key(option: str) -> str:
+        return SETTINGS_KEY if option == "videos_first" else f"folderOptions/{option}"
+
+    def _local(self, option: str = "videos_first") -> dict[str, float]:
         if self.settings is None:
             return {}
         try:
-            raw = json.loads(str(self.settings.value(SETTINGS_KEY, "") or "{}"))
+            raw = json.loads(str(self.settings.value(self._key(option), "") or "{}"))
             return {str(k): float(v) for k, v in raw.items() if isinstance(v, (int, float))} if isinstance(raw, dict) else {}
         except ValueError:
             return {}
 
-    def _save_local(self, entries: dict[str, float]) -> None:
+    def _save_local(self, entries: dict[str, float], option: str = "videos_first") -> None:
         if self.settings is not None:
             if len(entries) > 5000:                    # the oldest choices go first
                 entries = dict(sorted(entries.items(), key=lambda kv: abs(kv[1]))[-4000:])
-            self.settings.setValue(SETTINGS_KEY, json.dumps(entries))
+            self.settings.setValue(self._key(option), json.dumps(entries))
 
-    # -- the choice
-    def videos_first(self, folder: str) -> bool:
+    # -- a choice
+    def stamp(self, option: str, folder: str) -> float:
+        """When the choice was last made for `folder` — positive on, negative off, 0 never."""
         if not folder or not os.path.isabs(folder):
-            return False
+            return 0.0
         base = self._base(folder)
         if base is not None:
-            return self._read(base).get(_rel(base, folder), 0) > 0
-        return self._local().get(os.path.abspath(folder), 0) > 0
+            return self._read(base)[option].get(_rel(base, folder), 0.0)
+        return self._local(option).get(os.path.abspath(folder), 0.0)
 
-    def set_videos_first(self, folder: str, on: bool) -> None:
+    def marks(self, option: str, folder: str) -> tuple[str | None, dict[str, float]]:
+        """(the drive's root or None, every choice of `option` there — by drive-relative folder, or by full path
+        for a folder that's on no such drive): one read for a whole listing."""
+        base = self._base(folder) if folder and os.path.isabs(folder) else None
+        return (base, self._read(base)[option]) if base is not None else (None, self._local(option))
+
+    def set(self, option: str, folder: str, on: bool) -> None:
         """Raises OSError when the drive's file can't be written (read-only, gone)."""
         stamp = time.time() if on else -time.time()
         base = self._base(folder)
         if base is None:
-            entries = self._local()
+            entries = self._local(option)
             entries[os.path.abspath(folder)] = stamp
-            self._save_local(entries)
+            self._save_local(entries, option)
             return
         self._files.pop(base, None)                    # what's on the drive now, not what was read a while ago
-        entries = dict(self._read(base))
-        entries[_rel(base, folder)] = stamp
+        entries = {o: dict(v) for o, v in self._read(base).items()}
+        entries[option][_rel(base, folder)] = stamp
         self._write(base, entries)
+
+    def videos_first(self, folder: str) -> bool:
+        return self.stamp("videos_first", folder) > 0
+
+    def set_videos_first(self, folder: str, on: bool) -> None:
+        self.set("videos_first", folder, on)
 
     def renamed(self, pairs) -> int:
         """Folders renamed where they are: their entries (and those of folders inside) follow. Best effort."""
         moved = 0
-        local = None
         by_base: dict[str, list[tuple[str, str]]] = {}
+        local_pairs = []
         for old, new in pairs:
             base = self._base(os.path.dirname(new))
             if base is None:
-                local = self._local() if local is None else local
-                for k in [k for k in local if k == old or k.startswith(old.rstrip("/") + "/")]:
-                    local[new + k[len(old):]] = local.pop(k)
-                    moved += 1
+                local_pairs.append((old, new))
             else:
                 by_base.setdefault(base, []).append((_rel(base, old), _rel(base, new)))
-        if local is not None and moved:
-            self._save_local(local)
+        for o in OPTIONS if local_pairs else ():
+            local, n = self._local(o), 0
+            for old, new in local_pairs:
+                for k in [k for k in local if k == old or k.startswith(old.rstrip("/") + "/")]:
+                    local[new + k[len(old):]] = local.pop(k)
+                    n += 1
+            if n:
+                self._save_local(local, o)
+                moved += n
         for base, moves in by_base.items():
             self._files.pop(base, None)
-            entries = dict(self._read(base))
+            entries = {o: dict(v) for o, v in self._read(base).items()}
             n = 0
-            for ko, kn in moves:
-                for k in [k for k in entries if k == ko or k.startswith(ko + "/")]:
-                    entries[kn + k[len(ko):]] = entries.pop(k)
-                    n += 1
+            for o in OPTIONS:
+                for ko, kn in moves:
+                    for k in [k for k in entries[o] if k == ko or k.startswith(ko + "/")]:
+                        entries[o][kn + k[len(ko):]] = entries[o].pop(k)
+                        n += 1
             if n:
                 try:
                     self._write(base, entries)

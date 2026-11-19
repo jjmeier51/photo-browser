@@ -388,6 +388,15 @@ HDR photos (a standard picture plus a gain map) show their standard picture, as 
 does the same for what it makes. Thumbnails of HEIC / HEIF / AVIF / JPEG XL photos made before this are
 made again, once, the first time each folder is shown.
 
+### Highlight folders (the iPhone's bubbles)
+
+Folders the iPhone app shows as round highlights now show the same way here: a row of bubbles above a folder's
+files — downloaded Instagram / Facebook / TikTok profiles, an Instagram profile's Stories and highlights, and any
+folder you turned into an **album highlight**. Click one to open it. Right-click a folder ▸ **Turn into Album
+Highlight** (or Remove from Highlights) to make your own; it shows on the iPhone too. A **Reviews folder**
+(File ▸ New Reviews Folder…, or right-click ▸ Reviews Folder) shows only its folders, as large bubbles — press Show
+Files to see the ordinary listing. View ▸ Show Highlights turns the row off.
+
 ### Thumbnails and folder covers are kept between launches
 
 Thumbnails are kept in `~/Library/Application Support/Photo Browser for Mac/Thumbnails` (moved there from Caches,

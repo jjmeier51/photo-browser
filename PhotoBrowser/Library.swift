@@ -2918,7 +2918,15 @@ final class Library {
     func setAlbumHighlight(_ on: Bool, for folder: URL) {
         if on { albumHighlights.insert(folder.path) } else { albumHighlights.remove(folder.path) }
         FilePrefs.shared.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
+        let now = Date().timeIntervalSince1970
+        albumHighlightStamps[folder.path] = on ? now : -now      // Photo Browser for Mac follows (`syncFolderOptions`)
+        FilePrefs.shared.set(albumHighlightStamps, forKey: FolderOptions.highlightStampsKey)
+        scheduleTagSync(after: 1)
     }
+    /// When each album highlight / Reviews folder was last turned on (positive) or off (negative) — what
+    /// the merge with the drive's `folder-options.json` goes by (`FolderOptions`, `syncFolderOptions`).
+    var albumHighlightStamps: [String: Double] = (FilePrefs.shared.dictionary(forKey: FolderOptions.highlightStampsKey) as? [String: Double]) ?? [:]
+    var reviewsStamps: [String: Double] = (FilePrefs.shared.dictionary(forKey: FolderOptions.reviewsStampsKey) as? [String: Double]) ?? [:]
 
     /// Folders the user created as a "Reviews" folder — a container that holds *only*
     /// highlight folders. A Reviews folder gets a special cleared-out presentation
@@ -2930,6 +2938,10 @@ final class Library {
     func setReviewsFolder(_ on: Bool, for folder: URL) {
         if on { reviewsFolders.insert(folder.path) } else { reviewsFolders.remove(folder.path) }
         FilePrefs.shared.set(Array(reviewsFolders), forKey: "photoBrowser.reviewsFolders")
+        let now = Date().timeIntervalSince1970
+        reviewsStamps[folder.path] = on ? now : -now
+        FilePrefs.shared.set(reviewsStamps, forKey: FolderOptions.reviewsStampsKey)
+        scheduleTagSync(after: 1)
         labelsVersion += 1
     }
 
@@ -3319,6 +3331,13 @@ final class Library {
         igLastHandle = remapKeys(igLastHandle, remap)
         storyLinks = Dictionary(storyLinks.map { (remap($0.key), remap($0.value)) }, uniquingKeysWith: { a, _ in a })
         folderBirthdays = remapKeys(folderBirthdays, remap)
+        let movedHighlightStamps = remapKeys(albumHighlightStamps, remap), movedReviewsStamps = remapKeys(reviewsStamps, remap)
+        if movedHighlightStamps != albumHighlightStamps || movedReviewsStamps != reviewsStamps {
+            albumHighlightStamps = movedHighlightStamps     // a renamed highlight keeps when it was made one
+            reviewsStamps = movedReviewsStamps
+            FilePrefs.shared.set(albumHighlightStamps, forKey: FolderOptions.highlightStampsKey)
+            FilePrefs.shared.set(reviewsStamps, forKey: FolderOptions.reviewsStampsKey)
+        }
         let movedBirthdayStamps = remapKeys(birthdayStamps, remap)
         if movedBirthdayStamps != birthdayStamps {      // a renamed folder's birthday keeps when it was set
             birthdayStamps = movedBirthdayStamps
@@ -3398,6 +3417,7 @@ final class Library {
         let igPostedBy = self.igPostedBy, igLastHandle = self.igLastHandle, storyLinks = self.storyLinks
         let folderBirthdays = self.folderBirthdays, bubbleOrders = self.bubbleOrders
         let birthdayStamps = self.birthdayStamps
+        let albumHighlightStamps = self.albumHighlightStamps, reviewsStamps = self.reviewsStamps
         let lastTikTokHandleByFolder = self.lastTikTokHandleByFolder
         let instagramFolders = self.instagramFolders, facebookFolders = self.facebookFolders
         let tiktokFolders = self.tiktokFolders, tiktokLikes = self.tiktokLikes
@@ -3432,6 +3452,8 @@ final class Library {
             ud.set(storyLinks, forKey: "photoBrowser.storyLinks")
             ud.set(folderBirthdays, forKey: "photoBrowser.birthdays")
             ud.set(birthdayStamps, forKey: SharedBirthdays.stampsKey)
+            ud.set(albumHighlightStamps, forKey: FolderOptions.highlightStampsKey)
+            ud.set(reviewsStamps, forKey: FolderOptions.reviewsStampsKey)
             ud.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
             ud.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
             ud.set(tiktokLikes, forKey: "photoBrowser.tiktokLikes")
@@ -3548,6 +3570,7 @@ final class Library {
         moveDict(&captions); moveDict(&tags); moveDict(&photoOrigins); moveDict(&igPostedBy); moveDict(&igLastHandle)
         moveDict(&lastTikTokHandleByFolder); moveDict(&tiktokLikes); moveDict(&folderBirthdays)
         moveDict(&birthdayStamps)
+        moveDict(&albumHighlightStamps); moveDict(&reviewsStamps)
         moveDict(&instagramFolders); moveDict(&facebookFolders); moveDict(&tiktokFolders)
         moveDict(&vscoFolders); moveDict(&lastVSCOUsernameByFolder)
         moveDict(&ofFolders); moveDict(&lastOFUsernameByFolder); moveDict(&lastFacebookURLByFolder)
@@ -3653,6 +3676,7 @@ final class Library {
         pruneKeys(&captions); pruneKeys(&tags); pruneKeys(&photoOrigins); pruneKeys(&igPostedBy); pruneKeys(&igLastHandle)
         pruneKeys(&lastTikTokHandleByFolder); pruneKeys(&tiktokLikes); pruneKeys(&folderBirthdays)
         pruneKeys(&birthdayStamps)
+        pruneKeys(&albumHighlightStamps); pruneKeys(&reviewsStamps)
         pruneKeys(&instagramFolders); pruneKeys(&facebookFolders); pruneKeys(&tiktokFolders)
         pruneKeys(&vscoFolders); pruneKeys(&lastVSCOUsernameByFolder)
         pruneKeys(&ofFolders); pruneKeys(&lastOFUsernameByFolder); pruneKeys(&lastFacebookURLByFolder)

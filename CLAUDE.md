@@ -181,6 +181,10 @@ actions the app makes no network calls.
   Caches** — macOS empties that when space runs low), kept under 20 GB by `prune_thumbs` (least recently used first,
   daily); folder covers found by scanning and video lengths in `facts.sqlite` (`mac/facts_store.py`, `_Facts(kind=…)`)
   — every key carries a modified time, a cover is re-checked when handed out, "nothing found" is never kept.
+  **Highlight folders** (the iPhone's bubbles — §6ar): `mac/highlights.py` says which folders are (profile records,
+  the iPhone's backup, `folder-options.json` → `highlight` / `reviews`), `mac/highlight_strip.py` draws them above the
+  file view (`Pane._load_bubbles`, read off the window's thread); the iPhone shares album highlights and Reviews
+  folders through `FolderOptions.swift` (`albumHighlightStamps`, `reviewsStamps` — stamp them in any new setter).
   **Export All Frames warms the cache as it goes** (`export_all(on_frames=)` → `Thumbnails.warm`, own 2-thread pool,
   disk only; the window says "Thumbnails ready.") — §6aq-2.
   Photo Browser for Mac's **true grid**: the Photo Grid (⌘3) and icon view at minimum spacing (`Pane.tight()`, View ▸ Tight

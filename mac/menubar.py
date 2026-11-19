@@ -138,6 +138,9 @@ def install(win, sf) -> None:
     # -- File
     f = each("File")
     act(f, "New Folder", lambda: pane().new_folder(), "Ctrl+Shift+N", real_folder)
+    act(f, "New Reviews Folder…", lambda: pane().new_reviews_folder(), None, real_folder,
+        "A folder that holds only highlight folders: every folder made in it shows as a large bubble — the iPhone's "
+        "Reviews folder")
     act(f, "Open", lambda: pane().open_selected(), ["Ctrl+O", "Ctrl+Down"], lambda: bool(sel()))
     act(f, "Open With Default App", lambda: pane().open_external(), None,
         lambda: any(sf.kind_of(p) != "other" for p in sel()))
@@ -281,6 +284,10 @@ def install(win, sf) -> None:
     split.setCheckable(True)
     split.setChecked(win.split)
     v.addSeparator()
+    hls = act(v, "Show Highlights", lambda: pane().set_bubbles_on(not pane().bubbles_on()), None, None,
+              "The round highlight folders above a folder's files — the iPhone app's bubbles")
+    hls.setCheckable(True)
+    v.aboutToShow.connect(lambda: hls.setChecked(pane().bubbles_on()))
     vtop = act(v, "Videos at the Top", lambda: pane().set_videos_first(not pane().model.videos_first), None, real_folder,
                "In this folder: the videos first (after the folders), then the photos — remembered for the folder, "
                "and shown the same way on the iPhone")
@@ -417,6 +424,13 @@ def install(win, sf) -> None:
     def has_cover() -> bool:
         import folder_covers
         return one_folder() is not None and folder_covers.default(win.settings).cover(one_folder()) is not None
+    act(t, "Turn into Album Highlight", lambda: pane().set_highlight(one_folder(), True), None,
+        lambda: one_folder() is not None and pane().highlight_state(one_folder()) == "",
+        "The selected folder shown as a bubble above its folder's files — here and on the iPhone")
+    act(t, "Remove from Highlights", lambda: pane().set_highlight(one_folder(), False), None,
+        lambda: one_folder() is not None and pane().highlight_state(one_folder()) == "album")
+    act(t, "Reviews Folder (On / Off)", lambda: pane().set_reviews(one_folder(), not pane().is_reviews(one_folder())), None,
+        one_folder, "Every folder inside the selected folder shown as a large highlight, and nothing else")
     act(t, "Choose Folder Cover…", lambda: pane().choose_cover(one_folder()), None, one_folder,
         "A picture of your choosing as the selected folder's cover — here and on the iPhone")
     act(t, "Remove Folder Cover", lambda: pane().remove_cover(one_folder()), None, has_cover,
