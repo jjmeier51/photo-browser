@@ -4,7 +4,7 @@
 - **Edit with AI** (right-click a photo) / **Create with AI** (right-click a folder): the prompt (with an
   optional negative prompt, the prompting reminder, the two reusable prompts, and the prompt history with
   hearts), the model and up to ten of your own tunes (only the ones that can run on that model), reference
-  photos (up to the model's limit — any photos on the Mac or the drive), resolution (1K/2K/4K; Seedream 5.0
+  photos (up to the model's limit — any photos on the Mac or the drive), resolution (1K/2K/4K; 1K/2K/3K on Seedream 5.5; Seedream 5.0
   Pro is 2K), dimensions (Original keeps the photo's shape) and how many. Everything is remembered for next
   time, per flow. Generate closes the form and opens the job's window.
 - **A job's window** shows where it's at ("2 of 4 ready…"), then the results: each one kept unless clicked
@@ -181,7 +181,22 @@ class SettingsDialog(QDialog):
             form.addRow(f"{m} tune" if m != "Flux" else "Flux (base) tune", sb)
         v.addLayout(form)
         v.addWidget(_small("Tune ids are Astria's gallery models; change one only if Astria moves a model."))
+        self.report = QPlainTextEdit()
+        self.report.setReadOnly(True)
+        self.report.setMinimumHeight(150)
+        self.report.hide()
+        v.addWidget(self.report)
         row = QHBoxLayout()
+        self.check_btn = QPushButton("Check Connection")
+        self.check_btn.setToolTip("Asks Astria one small question both ways the app can reach it, and says what "
+                                  "came back — nothing is created")
+        self.check_btn.clicked.connect(self._check)
+        self.copy_btn = QPushButton("Copy")
+        self.copy_btn.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.report.toPlainText()))
+        self.copy_btn.hide()
+        self.checked.connect(self._checked_now)
+        row.addWidget(self.check_btn)
+        row.addWidget(self.copy_btn)
         row.addStretch(1)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
@@ -191,6 +206,31 @@ class SettingsDialog(QDialog):
         row.addWidget(cancel)
         row.addWidget(ok)
         v.addLayout(row)
+
+    checked = Signal(list)
+
+    def _check(self) -> None:
+        """Check Connection: off the window's thread (two requests, up to 30 s each), with the key as typed."""
+        self.check_btn.setEnabled(False)
+        self.report.show()
+        self.report.setPlainText("Asking Astria…")
+        key = self.key.text().strip()
+
+        def work() -> None:
+            try:
+                lines = A.check_connection(key)
+            except Exception as e:  # noqa: BLE001 — the check must always say something
+                lines = [f"The check itself failed: {type(e).__name__}: {e}"]
+            try:
+                self.checked.emit(lines)
+            except RuntimeError:
+                pass                                         # the dialog was closed meanwhile
+        threading.Thread(target=work, daemon=True).start()
+
+    def _checked_now(self, lines: list) -> None:
+        self.report.setPlainText("\n".join(lines))
+        self.check_btn.setEnabled(True)
+        self.copy_btn.show()
 
     def _save(self) -> None:
         if self.key.text().strip() != A.get_key():
@@ -494,6 +534,8 @@ class RequestWindow(QWidget):
         v.addWidget(self._head("Output"))
         form = QFormLayout()
         self.res_box, self.res = _seg(self, list(A.RESOLUTIONS), s.get("resolution", "2K"))
+        self.res_wanted = _checked(self.res)               # the tier last asked for (a model may not have it)
+        self.res.buttonClicked.connect(lambda b: setattr(self, "res_wanted", b.text()))
         form.addRow("Resolution", self.res_box)
         aspects = list(A.ASPECTS) if self.mode == "edit" else [a for a in A.ASPECTS if a != "Original"]
         self.asp_box, self.asp = _seg(self, aspects, s.get("aspect", "Original" if self.mode == "edit" else "1:1"))
@@ -663,14 +705,19 @@ class RequestWindow(QWidget):
         model = self.model.currentText()
         gen = A.resolve_generation(model, self._selected())
         pinned = A.MODELS[model][2]
+        have = A.resolutions(model)                        # Seedream 5.5: 1K / 2K / 3K; most: 1K / 2K / 4K
+        fit = A.fit_resolution(model, getattr(self, "res_wanted", "2K"))
         for b in self.res.buttons():
-            b.setEnabled(gen.supports_resolution and pinned is None)
-            if pinned is not None:
-                b.setChecked(b.text() == pinned)
+            b.setEnabled(gen.supports_resolution and pinned is None and b.text() in have)
+            b.setToolTip("" if b.text() in have or not gen.supports_resolution else f"{model} doesn't make {b.text()}")
+            if gen.supports_resolution and fit:
+                b.setChecked(b.text() == fit)
         if not gen.supports_resolution:
             note = f"{gen.label} — Flux takes no resolution choice."
         elif pinned:
             note = f"{gen.label} — always {pinned} on Astria."
+        elif have != A.USUAL_RESOLUTIONS:
+            note = f"Runs on {gen.label} — up to {have[-1]}."
         else:
             note = f"Runs on {gen.label}."
         tunes = self._selected()
@@ -747,8 +794,7 @@ class RequestWindow(QWidget):
         A.record_prompt(s["prompt"])
         model = s["model"]
         gen = A.resolve_generation(model, self._selected())
-        pinned = A.MODELS[model][2]
-        resolution = (pinned or s["resolution"]) if gen.supports_resolution else None
+        resolution = A.fit_resolution(model, s["resolution"]) if gen.supports_resolution else None
         text = gen.prefix + A.compose_prompt(s["prompt"], s["negative"] if s["negative_on"] else None)
         aspect = A.ASPECTS.get(s["aspect"]) if self.mode == "edit" else (A.ASPECTS.get(s["aspect"]) or "1:1")
         if self.mode == "edit" and len(self.targets) > 1:

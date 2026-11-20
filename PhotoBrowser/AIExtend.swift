@@ -46,6 +46,7 @@ enum AIExtend {
     /// ids for these newest versions aren't published, so each has a best-known
     /// default that the user can override in Settings.
     enum AIModel: String, CaseIterable, Identifiable, Sendable {
+        case seedream55 = "Seedream 5.5"
         case seedream5Pro = "Seedream 5.0 Pro"
         case seedream5Lite = "Seedream 5.0 Lite"
         case seedream45 = "Seedream 4.5"
@@ -61,8 +62,12 @@ enum AIExtend {
         /// "Nano Banana 2.0" card moved to its own id (5850983) — so the old id now means 2.1.
         /// Nano Banana Pro (added here Nov 2026): 3618064 is read off Astria's gallery page by position
         /// (the same reading gave the five ids above correctly) — it can be overridden in Settings.
+        /// Seedream 5.5 (Nov 20, 2026): 6000082, from Astria's public gallery listing
+        /// (astria.ai/gallery/tunes.json?title=seedream — "Seedream 5.5", added Oct 30). Astria's docs
+        /// don't describe it yet, so its reference limit is taken as 5.0 Pro's and its sizes as 1K/2K/3K.
         var fallbackTune: Int {
             switch self {
+            case .seedream55:    return 6000082
             case .seedream5Pro:  return 5236038
             case .seedream5Lite: return 4160332
             case .seedream45:    return 3691308
@@ -82,7 +87,7 @@ enum AIExtend {
         /// (its img2img path is the single input image).
         var maxReferenceImages: Int {
             switch self {
-            case .seedream5Pro:                                            return 10
+            case .seedream55, .seedream5Pro:                               return 10
             case .seedream5Lite, .seedream45, .nanoBananaPro, .nanoBanana21, .nanoBanana2: return 14
             case .flux:                                                    return 0
             }
@@ -91,10 +96,21 @@ enum AIExtend {
         /// at 2K on Astria, so it always generates at 2K whatever the picker held (the picker is
         /// disabled and shows 2K while it's selected).
         var fixedResolution: OutputResolution? { self == .seedream5Pro ? .k2 : nil }
+        /// The output tiers the model offers, smallest first: Seedream 5.5 makes up to 3K (1K / 2K / 3K),
+        /// the others 1K / 2K / 4K. (A pinned model lists them too — its picker is disabled.)
+        var resolutions: [OutputResolution] { self == .seedream55 ? [.k1, .k2, .k3] : [.k1, .k2, .k4] }
+        /// The tier to send when the picker holds `wanted`: the pinned one; else `wanted` when the model
+        /// has it; else the largest it has that isn't larger (4K → 3K on Seedream 5.5, 3K → 2K elsewhere).
+        func fitted(_ wanted: OutputResolution) -> OutputResolution {
+            if let fixed = fixedResolution { return fixed }
+            let have = resolutions
+            if have.contains(wanted) { return wanted }
+            return have.last(where: { $0.rank <= wanted.rank }) ?? have[0]
+        }
         fileprivate var tuneKey: String { "photoBrowser.astriaTune.\(rawValue)" }
         /// The partner models offered as the built-in default / Settings overrides (Flux is offered
         /// only in the Edit/Create pickers, and shares the separate Flux tune setting).
-        static var partnerModels: [AIModel] { [.seedream5Pro, .seedream5Lite, .seedream45, .nanoBananaPro, .nanoBanana21, .nanoBanana2] }
+        static var partnerModels: [AIModel] { [.seedream55, .seedream5Pro, .seedream5Lite, .seedream45, .nanoBananaPro, .nanoBanana21, .nanoBanana2] }
     }
 
     /// One reference photo for Edit/Create: its upload JPEG, a stable identity (`path|mtime|size`)
@@ -119,13 +135,23 @@ enum AIExtend {
     private static let referenceTunesKey = "photoBrowser.astriaReferenceTunes"
 
     /// Output resolution the user picks. Sent as Astria's `prompt[resolution]` size **tier**
-    /// (1K / 2K / 4K) — the documented way to control output size on the gallery tunes. (The old
+    /// (1K / 2K / 4K — and 3K, which only Seedream 5.5 offers: `AIModel.resolutions`) — the
+    /// documented way to control output size on the gallery tunes. (The old
     /// path only set `super_resolution` for 4K, which Nano Banana 2 ignored, so it capped at 2K.)
     /// The uploaded input is still capped at 2048 px (the tune's input limit); the tier drives the
     /// generated size.
     enum OutputResolution: String, CaseIterable, Identifiable, Sendable {
-        case k1 = "1K", k2 = "2K", k4 = "4K"
+        case k1 = "1K", k2 = "2K", k3 = "3K", k4 = "4K"
         var id: String { rawValue }
+        /// Smallest to largest, for stepping down to a tier a model has (`AIModel.fitted`).
+        var rank: Int {
+            switch self {
+            case .k1: return 1
+            case .k2: return 2
+            case .k3: return 3
+            case .k4: return 4
+            }
+        }
         /// Long side (px) of the uploaded input. Capped at 2048 — the tune limit.
         var uploadLongSide: CGFloat { self == .k1 ? 1024 : 2048 }
         /// Value for `prompt[resolution]` — the output size tier.
@@ -195,15 +221,27 @@ enum AIExtend {
         return v.isEmpty ? defaultPrompt : v
     }
     static var defaultModel: AIModel {
+        adoptSeedream55Once()
+        return AIModel(rawValue: UserDefaults.standard.string(forKey: modelKey) ?? "") ?? .seedream55
+    }
+    /// One-time move to the new default, Seedream 5.5 (Nov 2026): a previously saved default would
+    /// otherwise keep winning — and so would the model the Edit / Create sheets remember from their
+    /// last run, which is what they reopen on. Both are moved once (a sheet left on Flux stays on
+    /// Flux: that was a choice of tune, not of model); the Settings picker and the sheets can change
+    /// it afterwards as before. Called from `defaultModel` and `lastRunSettings`.
+    private static func adoptSeedream55Once() {
         let d = UserDefaults.standard
-        // One-time migration to the new default: a previously-saved default (the old auto-default
-        // "Seedream 4.5") would otherwise keep winning. Bump the stored default to Seedream 5.0
-        // Pro once; the Settings picker can still change it afterward.
-        if !d.bool(forKey: "photoBrowser.astriaDefault5Pro") {
-            d.set(true, forKey: "photoBrowser.astriaDefault5Pro")
-            d.set(AIModel.seedream5Pro.rawValue, forKey: modelKey)
+        guard !d.bool(forKey: "photoBrowser.astriaDefault55") else { return }
+        d.set(true, forKey: "photoBrowser.astriaDefault55")       // first: `lastRunSettings` below comes back here
+        d.set(true, forKey: "photoBrowser.astriaDefault5Pro")     // (the earlier move to 5.0 Pro is superseded)
+        d.set(AIModel.seedream55.rawValue, forKey: modelKey)
+        for create in [false, true] {
+            var s = lastRunSettings(create: create)
+            if let m = AIModel(rawValue: s.model), m != .flux, m != .seedream55 {
+                s.model = AIModel.seedream55.rawValue
+                saveRunSettings(s, create: create)
+            }
         }
-        return AIModel(rawValue: d.string(forKey: modelKey) ?? "") ?? .seedream5Pro
     }
 
     static func tuneID(for model: AIModel) -> Int {
@@ -341,6 +379,7 @@ enum AIExtend {
         create ? "photoBrowser.aiRun.create" : "photoBrowser.aiRun.edit"
     }
     static func lastRunSettings(create: Bool) -> RunSettings {
+        adoptSeedream55Once()
         guard let data = UserDefaults.standard.data(forKey: runSettingsKey(create: create)),
               let s = try? JSONDecoder().decode(RunSettings.self, from: data) else { return RunSettings() }
         return s

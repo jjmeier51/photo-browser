@@ -230,7 +230,7 @@ nonisolated enum SurprisePrompts {
     private static func voice(for model: AIExtend.AIModel) -> Voice {
         switch model {
         case .nanoBananaPro, .nanoBanana21, .nanoBanana2: return .nanoBanana
-        case .seedream5Pro, .seedream5Lite, .seedream45, .flux: return .seedream
+        case .seedream55, .seedream5Pro, .seedream5Lite, .seedream45, .flux: return .seedream
         }
     }
 

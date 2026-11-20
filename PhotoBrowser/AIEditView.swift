@@ -72,7 +72,7 @@ struct AIEditView: View {
                 referenceSection
                 Section {
                     Picker("Resolution", selection: $resolution) {
-                        ForEach(AIExtend.OutputResolution.allCases) { Text($0.rawValue).tag($0) }
+                        ForEach(model.resolutions) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
                     .disabled(model.fixedResolution != nil)
@@ -85,6 +85,8 @@ struct AIEditView: View {
                 } footer: {
                     if let fixed = model.fixedResolution {
                         Text("\(model.rawValue) always generates at \(fixed.rawValue) — the most Astria supports for it.")
+                    } else if model == .seedream55 {
+                        Text("Seedream 5.5 makes images up to 3K.")
                     }
                 }
                 Section {
@@ -92,7 +94,7 @@ struct AIEditView: View {
                         ForEach(counts, id: \.self) { Text("\($0)").tag($0) }
                     }
                 } footer: {
-                    Text("Uploads the photo to Astria to generate edits — it runs in the background, so you can keep browsing while it works. You'll get a notification when the images are ready; tap it to review them. “4K” asks for the highest resolution; “Original” keeps the photo's shape. Kept results save to an “AI” subfolder, keeping the original's EXIF.")
+                    Text("Uploads the photo to Astria to generate edits — it runs in the background, so you can keep browsing while it works. You'll get a notification when the images are ready; tap it to review them. “4K” (“3K” on Seedream 5.5) asks for the highest resolution; “Original” keeps the photo's shape. Kept results save to an “AI” subfolder, keeping the original's EXIF.")
                 }
             }
             .navigationTitle("Edit with AI")
@@ -106,10 +108,11 @@ struct AIEditView: View {
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
             // A model with a smaller reference limit keeps the first N picked.
-            .onAppear { if let fixed = model.fixedResolution { resolution = fixed } }
+            // The picker only offers the model's own sizes (3K is Seedream 5.5's; 4K the others').
+            .onAppear { resolution = model.fitted(resolution) }
             .onChange(of: model) { _, m in
                 if referenceURLs.count > m.maxReferenceImages { referenceURLs = Array(referenceURLs.prefix(m.maxReferenceImages)) }
-                if let fixed = m.fixedResolution { resolution = fixed }
+                resolution = m.fitted(resolution)
             }
             .task {
                 tunes = await library.loadAITunes()
@@ -183,7 +186,7 @@ struct AIEditView: View {
     /// Kicks off generation app-wide (it keeps running while you browse) and closes this sheet.
     private func generate() {
         guard AIExtend.isConfigured else { showSettings = true; return }
-        let res = model.fixedResolution ?? resolution      // Seedream 5.0 Pro is always 2K
+        let res = model.fitted(resolution)                 // Seedream 5.0 Pro is always 2K; 5.5 tops out at 3K
         // Remember these settings so the sheet reopens pre-filled the same way after review.
         AIExtend.saveRunSettings(AIExtend.RunSettings(prompt: prompt, model: model.rawValue,
                                                       tuneIDs: selectedTunes.map(\.id),

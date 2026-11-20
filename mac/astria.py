@@ -7,7 +7,7 @@ any reference photos they pick.
 The requests are the iPhone's, field for field (feature-notes §1), so the two apps behave the same:
 - **A generation** is a multipart `POST /tunes/{tune}/prompts` (`prompt[text]`, `prompt[num_images]`,
   `prompt[aspect_ratio]` — always a concrete ratio, the nearest supported one to the photo for "Original" —
-  `prompt[resolution]` 1K/2K/4K except on Flux, `prompt[input_image]` for an edit). The POST retries
+  `prompt[resolution]` 1K/2K/4K — 1K/2K/3K on Seedream 5.5 — except on Flux, `prompt[input_image]` for an edit). The POST retries
   transient failures (429/5xx, a connection never made) with backoff, and after an *ambiguous* failure
   (the upload may have landed) it looks for the prompt among the tune's newest before posting again, so a
   billed prompt is never made twice.
@@ -15,8 +15,11 @@ The requests are the iPhone's, field for field (feature-notes §1), so the two a
   each image is fetched the moment its address appears, the count waited for, and fewer accepted only once
   the list stopped growing for 20 polls; a second sweep re-reads the addresses (they're signed and expire)
   for any that failed. Every download is checked to be a picture before it counts.
-- **Models**: Seedream 5.0 Pro / 5.0 Lite / 4.5, Nano Banana Pro / 2.1 / 2, Flux — the same gallery tune ids
-  (overridable), the same reference limits (14; 10 for 5.0 Pro; none on Flux), 5.0 Pro pinned to 2K.
+- **Models**: Seedream 5.5 (the default since Nov 20) / 5.0 Pro / 5.0 Lite / 4.5, Nano Banana Pro / 2.1 / 2,
+  Flux — the same gallery tune ids (overridable), the same reference limits (14; 10 for 5.5 and 5.0 Pro; none on
+  Flux), 5.0 Pro pinned to 2K, 5.5 up to 3K (`resolutions`, `fit_resolution`).
+- **Two ways to Astria** (`AutoTransport`, Nov 20): Python's networking, and — when the front door answers that
+  with its browser check — the same request through the Mac's own curl; `check_connection` asks both and says.
   **Tunes** (the account's own) combine as the iPhone does: one tune runs on its own base (or as a
   `<lora:id:1>` on Flux, with its "<token> <class>" trigger phrase); several stack as `<lora:…>` (Flux) or
   `<faceid:…>` (partner models).
@@ -70,6 +73,10 @@ MAX_RECOVERY_ATTEMPTS = 4
 
 # name, gallery tune id, max reference images, pinned resolution
 MODELS: dict[str, tuple[int, int, str | None]] = {
+    # Seedream 5.5 (Nov 20): id 6000082 from Astria's public gallery listing (astria.ai/gallery/tunes.json?title=
+    # seedream — "Seedream 5.5", partner-1, added Oct 30 2026). Astria's docs don't describe it yet: the reference
+    # limit is taken as 5.0 Pro's (10) and its sizes as 1K / 2K / 3K (`MODEL_RESOLUTIONS`) — the person's word.
+    "Seedream 5.5": (6000082, 10, None),
     "Seedream 5.0 Pro": (5236038, 10, "2K"),
     "Seedream 5.0 Lite": (4160332, 14, None),
     "Seedream 4.5": (3691308, 14, None),
@@ -81,7 +88,32 @@ MODELS: dict[str, tuple[int, int, str | None]] = {
     "Flux": (DEFAULT_FLUX_TUNE, 0, None),
 }
 PARTNER_MODELS = [m for m in MODELS if m != "Flux"]
-RESOLUTIONS = ("1K", "2K", "4K")
+DEFAULT_MODEL = "Seedream 5.5"
+RESOLUTIONS = ("1K", "2K", "3K", "4K")                    # every size tier there is, smallest first
+USUAL_RESOLUTIONS = ("1K", "2K", "4K")
+MODEL_RESOLUTIONS = {"Seedream 5.5": ("1K", "2K", "3K")}  # a model whose tiers aren't the usual three
+
+
+def resolutions(model: str) -> tuple[str, ...]:
+    """The size tiers `model` offers: its pinned one alone, none for Flux, else its own list or the usual three."""
+    if model == "Flux" or model not in MODELS:
+        return ()
+    pinned = MODELS[model][2]
+    return (pinned,) if pinned else MODEL_RESOLUTIONS.get(model, USUAL_RESOLUTIONS)
+
+
+def fit_resolution(model: str, wanted: str | None) -> str | None:
+    """The tier to send for `model` when the person asked for `wanted`: that one when the model has it, else the
+    largest it has that isn't larger (4K on Seedream 5.5 → 3K; 3K on Nano Banana → 2K), else its smallest."""
+    have = resolutions(model)
+    if not have:
+        return None
+    if wanted in have:
+        return wanted
+    rank = RESOLUTIONS.index(wanted) if wanted in RESOLUTIONS else RESOLUTIONS.index("2K")
+    below = [t for t in have if RESOLUTIONS.index(t) <= rank]
+    return below[-1] if below else have[0]
+
 ASPECTS = {"Original": None, "1:1": "1:1", "4:5": "4:5", "9:16": "9:16"}
 COUNTS = (1, 2, 3, 4, 8)
 REUSABLE_PROMPTS = [
@@ -246,8 +278,19 @@ def set_tune_id(model: str, tid: int) -> None:
 
 
 def default_model() -> str:
-    m = store().get("default_model", "Seedream 5.0 Pro")
-    return m if m in MODELS else "Seedream 5.0 Pro"
+    """The model new windows start on. Once (Nov 20): Seedream 5.5 becomes it — and the model the Edit / Create
+    windows remember from last time, which otherwise keeps winning — as the iPhone's `defaultModel` does. After
+    that the choice is the person's again (Astria Settings, and whatever a window was last left on)."""
+    st = store()
+    if not st.get("default_is_55"):
+        st.set("default_is_55", True)
+        st.set("default_model", DEFAULT_MODEL)
+        for run in ("run_edit", "run_create"):
+            kept = st.get(run)
+            if isinstance(kept, dict) and kept.get("model") in MODELS and kept.get("model") != "Flux":
+                st.set(run, {**kept, "model": DEFAULT_MODEL})
+    m = st.get("default_model", DEFAULT_MODEL)
+    return m if m in MODELS else DEFAULT_MODEL
 
 
 def compose_prompt(prompt: str, negative: str | None) -> str:
@@ -412,6 +455,7 @@ class Response:
     status: int
     body: bytes
     headers: dict
+    route: str = ""                  # which way it went: "python", "curl" — "python+curl" when both were checked
 
 
 class Transport:
@@ -451,6 +495,174 @@ class Transport:
             raise Transport.Ambiguous(str(e)) from e
 
 
+class CurlTransport(Transport):
+    """The same request through the Mac's own `curl` (/usr/bin/curl — part of macOS; Astria's documentation's own
+    examples are curl commands): the same address, the same headers, the same User-Agent naming this app — only
+    the networking underneath is the system's instead of Python's. The key never appears on the command line
+    (`ps` would show it): the whole request is a config handed to curl on its standard input, the body a file in
+    a private temp folder."""
+
+    NEVER_SENT = {5, 6, 7, 35, 60, 77}          # no proxy/host found, no connection, TLS never made, certificates
+
+    def __init__(self, curl: str | None = None) -> None:
+        self.curl = curl or self.find()
+
+    @staticmethod
+    def find() -> str | None:
+        for path in ("/usr/bin/curl", shutil.which("curl")):
+            if path and os.access(path, os.X_OK):
+                return path
+        return None
+
+    @staticmethod
+    def _quoted(value: str) -> str:
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ") + '"'
+
+    def send(self, method: str, url: str, headers: dict, body: bytes | None, timeout: float) -> Response:
+        import tempfile
+        import children
+        if not self.curl:
+            raise Transport.PreSend("curl isn't on this Mac")
+        tmp = tempfile.mkdtemp(prefix="pb-astria-")
+        try:
+            out, heads = os.path.join(tmp, "body"), os.path.join(tmp, "headers")
+            q = self._quoted
+            cfg = [f"url = {q(url)}", f"request = {q(method)}", f"output = {q(out)}", f"dump-header = {q(heads)}",
+                   f"max-time = {int(max(5, timeout))}", "connect-timeout = 20", "silent", "show-error",
+                   'write-out = "%{http_code}"', 'header = "Expect:"']
+            for k, v in headers.items():
+                cfg.append(f"header = {q(f'{k}: {v}')}")
+            if body is not None:
+                sent = os.path.join(tmp, "sent")
+                with open(sent, "wb") as f:
+                    f.write(body)
+                cfg.append(f"data-binary = {q('@' + sent)}")
+            try:
+                # -q first: the person's own ~/.curlrc must not change what's sent
+                proc = subprocess.Popen([self.curl, "-q", "--config", "-"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, **children.OWN_GROUP)
+            except OSError as e:
+                raise Transport.PreSend(str(e)) from e
+            with children.tracked(proc):
+                try:
+                    so, se = proc.communicate("\n".join(cfg).encode("utf-8"), timeout=timeout + 30)
+                except subprocess.TimeoutExpired as e:
+                    children.stop(proc)
+                    raise Transport.Ambiguous("curl took too long") from e
+            if proc.returncode != 0:
+                why = (se or b"").decode("utf-8", "replace").strip()[:300] or f"curl stopped with {proc.returncode}"
+                raise (Transport.PreSend if proc.returncode in self.NEVER_SENT else Transport.Ambiguous)(why)
+            try:
+                status = int((so or b"0").decode("ascii", "replace").strip()[-3:])
+            except ValueError:
+                status = 0
+            data = b""
+            if os.path.exists(out):
+                with open(out, "rb") as f:
+                    data = f.read()
+            got: dict[str, str] = {}
+            if os.path.exists(heads):
+                with open(heads, "rb") as f:
+                    blocks = [b for b in re.split(r"\r?\n\r?\n", f.read().decode("latin-1")) if b.strip()]
+                for line in (blocks[-1].splitlines()[1:] if blocks else []):     # the last answer's (not a proxy's)
+                    name, sep, value = line.partition(":")
+                    if sep:
+                        got[name.strip()] = value.strip()
+            if not status:
+                raise Transport.Ambiguous("curl gave no answer")
+            return Response(status, data, got, "curl")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+ROUTE_DAYS = 7                       # how long "curl gets through where Python's networking doesn't" is believed
+
+
+class AutoTransport(Transport):
+    """What the app's clients use: Python's networking — and, **when Astria's front door answers that with its
+    browser check**, the same request once more through the Mac's own curl (`CurlTransport`). A request the front
+    door turned away never reached Astria, so sending it again makes nothing twice. Whichever got through is used
+    from then on (remembered `ROUTE_DAYS` days in astria.json → `route`, then Python's is tried again).
+
+    Why (Nov 20): from two networks the app's requests — same headers, same uploads, a made-up key — reached Astria
+    every time, while on the person's Mac they were met with "Just a moment…" for days. What differs is the
+    connection underneath: the Mac's Python and its TLS library, which Cloudflare can tell from other clients'.
+    The request itself stays honest either way: this app's name as User-Agent, the person's own key, Astria's
+    documented API. When both ways are checked (`route` "python+curl"), it's the network that's being checked,
+    and the message says so."""
+
+    def __init__(self, first: Transport | None = None, second: Transport | None = None, remember: bool = True) -> None:
+        self.python = first or Transport()
+        self.curl = second if second is not None else CurlTransport()
+        self.remember = remember
+        self.lock = threading.Lock()
+        self.use = "python"
+        if remember:
+            kept = store().get("route", {}) or {}
+            if kept.get("use") == "curl" and time.time() - float(kept.get("at", 0)) < ROUTE_DAYS * 86400 \
+                    and getattr(self.curl, "curl", True):
+                self.use = "curl"
+
+    def _prefer(self, use: str) -> None:
+        with self.lock:
+            if self.use == use:
+                return
+            self.use = use
+        _route_note(f"switched to {use}")
+        if self.remember:
+            store().set("route", {"use": use, "at": time.time()})
+
+    def send(self, method: str, url: str, headers: dict, body: bytes | None, timeout: float) -> Response:
+        order = [("curl", self.curl), ("python", self.python)] if self.use == "curl" else \
+            [("python", self.python), ("curl", self.curl)]
+        name, way = order[0]
+        try:
+            r = way.send(method, url, headers, body, timeout)
+        except Transport.PreSend:
+            if name != "curl":
+                raise
+            self._prefer("python")                           # curl is gone or can't connect: Python's way, as before
+            r = self.python.send(method, url, headers, body, timeout)
+            r.route = "python"
+            return r
+        r.route = r.route or name
+        if 200 <= r.status < 300 or explain(r).kind != "challenge":
+            return r
+        other, second = order[1]                             # the browser check: once more, the other way
+        try:
+            r2 = second.send(method, url, headers, body, timeout)
+        except Transport.PreSend:
+            return r
+        r2.route = other
+        if 200 <= r2.status < 300 or explain(r2).kind != "challenge":
+            _route_note(f"{method} {url.replace(BASE, '')}: {name} was met with the browser check, {other} got "
+                        f"HTTP {r2.status}")
+            self._prefer(other)
+            return r2
+        r.route = "python+curl"
+        return r
+
+
+def _route_note(text: str) -> None:
+    try:
+        LOGS.mkdir(parents=True, exist_ok=True)
+        with open(LOGS / "astria-requests.log", "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} route: {text}\n")
+    except OSError:
+        pass
+
+
+_AUTO: AutoTransport | None = None
+
+
+def default_transport() -> Transport:
+    """The app's one transport (it remembers which way gets through)."""
+    global _AUTO
+    if _AUTO is None:
+        _AUTO = AutoTransport()
+    return _AUTO
+
+
 def _multipart(fields: dict[str, str], files: list[tuple[str, str, str, bytes]]) -> tuple[bytes, str]:
     boundary = f"PB-{uuid.uuid4()}"
     out = io.BytesIO()
@@ -470,6 +682,10 @@ def _advice(ref: Refusal, tried: int = 1) -> str:
     again = f" Tried {tried} times, waiting in between." if tried > 1 else ""
     log = " Details: " + str(LOGS / "astria-requests.log").replace(str(Path.home()), "~") + "."
     if ref.kind == "challenge":
+        if ref.route == "python+curl":
+            return (ref.message + again + " It came back the same through the Mac's own networking, so it's this "
+                    "network or address Cloudflare is checking, not the app or the API key: turn off a VPN if one "
+                    "is on, or try another network (a phone hotspot); if it stays, send Astria the Ray number." + log)
         return (ref.message + again + " It's the network or the number of requests, not the API key — wait 10–15 "
                 "minutes, and turn off a VPN if one is on." + log)
     if ref.kind == "limited":
@@ -520,6 +736,7 @@ class Refusal:
     status: int = 0
     ray: str = ""
     retry_after: float | None = None
+    route: str = ""                  # Response.route: "python+curl" = checked both ways
 
     @property
     def wait(self) -> bool:
@@ -543,6 +760,12 @@ def explain(r: Response, sent: int = 0) -> Refusal:
     that came back — an upload-too-large page, a gateway timeout, Astria's hosting error page — was reported as
     "blocked at its Cloudflare check", so the one message covered five different problems with five different
     answers. Decided from the status, the front door's own headers (`cf-mitigated`, `cf-ray`) and the page."""
+    ref = _explain(r, sent)
+    ref.route = getattr(r, "route", "") or ""
+    return ref
+
+
+def _explain(r: Response, sent: int = 0) -> Refusal:
     status = int(r.status or 0)
     ray = _header(r.headers, "cf-ray")
     after = None
@@ -567,6 +790,10 @@ def explain(r: Response, sent: int = 0) -> Refusal:
             msg = "Astria didn't accept the API key — check it in the AI settings."
         return Refusal("api", (msg or json.dumps(j)[:300]) + ("" if msg and status < 500 else where), status, ray, after)
     text = body[:8000].decode("utf-8", "replace").lower()
+    if status == 401 and not text.lstrip().startswith(("<!doctype", "<html")):
+        # Astria's answer to a key it doesn't know is plain text ("HTTP Token: Access denied.")
+        return Refusal("api", "Astria didn't accept the API key — check it in Astria Settings (it's on astria.ai "
+                              "under your account's API page).", status, ray, after)
     code = (_CF_CODE.search(text) or [None, ""])[1]
     if status == 429 or code == "1015":
         return Refusal("limited", "Astria's front door (Cloudflare) says this Mac is sending requests too fast." + where,
@@ -607,7 +834,7 @@ def _note_refusal(method: str, url: str, r: Response, ref: Refusal, sent: int) -
                                            (r.body or b"")[:3000].decode("utf-8", "replace"))).strip()[:400]
         with open(path, "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {method} {url.replace(BASE, '')} → HTTP {r.status} "
-                    f"({ref.kind}); sent {sent:,} bytes; " + ", ".join(f"{k}: {v}" for k, v in heads.items() if v)
+                    f"({ref.kind}{', via ' + ref.route if ref.route else ''}); sent {sent:,} bytes; " + ", ".join(f"{k}: {v}" for k, v in heads.items() if v)
                     + f"; body: {start}\n")
     except OSError:
         pass
@@ -674,6 +901,61 @@ class Gate:
 GATE = Gate()
 
 
+def check_connection(key: str | None = None) -> list[str]:
+    """Astria Settings ▸ Check Connection: asks Astria for the account's first tune both ways the app can — Python's
+    networking and the Mac's own curl — and says in plain lines what each got, which the app is using, and what
+    that means. Nothing is created (one small GET each). The key is never in the lines."""
+    import platform
+    import ssl
+    key = get_key() if key is None else key
+    lines = [f"{app_identity.APP_NAME} · Python {platform.python_version()} · {ssl.OPENSSL_VERSION} · "
+             f"macOS {platform.mac_ver()[0] or '—'}"]
+    if not key:
+        return lines + ["No API key is saved — add it above (astria.ai ▸ your account ▸ API)."]
+    lines.append(f"API key: saved ({len(key)} characters)")
+    auto = default_transport()
+    ways = [("Python's networking", getattr(auto, "python", None) or Transport()),
+            ("the Mac's curl", getattr(auto, "curl", None) or CurlTransport())]
+    heads = {"Authorization": f"Bearer {key}", "Accept": "application/json", "User-Agent": UA}
+    kinds = []
+    for name, way in ways:
+        try:
+            r = way.send("GET", BASE + "/tunes?limit=1", heads, None, 30)
+        except (Transport.PreSend, Transport.Ambiguous) as e:
+            lines.append(f"Through {name}: no answer ({e})")
+            kinds.append("none")
+            continue
+        if 200 <= r.status < 300:
+            lines.append(f"Through {name}: Astria answered (HTTP {r.status}) — this way works.")
+            kinds.append("ok")
+        else:
+            ref = explain(r)
+            lines.append(f"Through {name}: {ref.message}")
+            kinds.append(ref.kind)
+    lines.append(f"The app is sending through: {'the Mac’s curl' if getattr(auto, 'use', 'python') == 'curl' else 'Python’s networking'}"
+                 + (f" · paused another {round(GATE.cooling())} s" if GATE.cooling() > 0 else ""))
+    if "ok" in kinds:
+        if kinds[0] != "ok" and isinstance(auto, AutoTransport):
+            auto._prefer("curl")
+            lines.append("→ Python's networking is being turned away but the Mac's own gets through: the app uses "
+                         "that from now on. Try Generate again.")
+        else:
+            lines.append("→ Astria is reachable and the key is accepted. If a generation still fails, the reason is "
+                         "in its message (and in the log below).")
+    elif all(k == "challenge" for k in kinds):
+        lines.append("→ Both ways are met with Cloudflare's browser check: it's this network or address being "
+                     "checked. Turn off a VPN if one is on, or try another network (a phone hotspot). If it stays, "
+                     "send Astria these lines.")
+    elif "api" in kinds:
+        lines.append("→ Astria is reachable but refused the request itself — see its words above (usually the key).")
+    elif all(k == "none" for k in kinds):
+        lines.append("→ Astria couldn't be reached at all — check the internet connection.")
+    else:
+        lines.append("→ Astria's side isn't answering properly right now — try again in a few minutes.")
+    lines.append("Log: " + str(LOGS / "astria-requests.log").replace(str(Path.home()), "~"))
+    return lines
+
+
 def pause_note() -> str:
     """Words for a window when Astria has asked this Mac to wait ("" when it hasn't)."""
     left = GATE.cooling()
@@ -701,7 +983,7 @@ class Client:
     def __init__(self, key: str | None = None, transport: Transport | None = None,
                  sleep: Callable[[float], None] = time.sleep, gate: Gate | None = None) -> None:
         self.key = get_key() if key is None else key
-        self.t = transport or Transport()
+        self.t = transport or default_transport()
         self.sleep = sleep
         if gate is None and (transport is not None or sleep is not time.sleep):
             # A client with its own transport or sleep (tests): its own gate, on a clock that moves only when
@@ -1094,7 +1376,19 @@ class Client:
             fields["prompt[resolution]"] = resolution
         files = [("prompt[input_image]", "input.jpg", "image/jpeg", image)] if image else []
         try:
-            pid = self.create_prompt(tune, fields, files, wait)
+            try:
+                pid = self.create_prompt(tune, fields, files, wait)
+            except AIError as e:
+                ref = self.last_refusal
+                # "3K" is the tier's name by the pattern of 1K / 2K / 4K — Astria documents no list. If Astria
+                # doesn't know it for this model, the picture is still made, a size down, and the person told.
+                if not (resolution == "3K" and ref is not None and ref.kind == "api" and ref.status in (400, 422)
+                        and "resolution" in (e.message or "").lower()):
+                    raise
+                fields["prompt[resolution]"] = "2K"
+                pid = self.create_prompt(tune, fields, files, wait)
+                if note:
+                    note(f"Astria didn't take 3K for this model (“{e.message}”) — made at 2K instead.")
         except AIError as e:
             if e.kind == "server" and reused:               # a remembered reference tune may be gone on Astria
                 store().update("reference_tunes", lambda d: {k: v for k, v in (d or {}).items() if k not in reused})

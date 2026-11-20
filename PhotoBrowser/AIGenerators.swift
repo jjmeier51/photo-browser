@@ -253,6 +253,7 @@ struct ReferenceThumb: View {
 enum TuneBaseModel: String, CaseIterable, Identifiable, Sendable {
     case nanoBanana21 = "Nano Banana 2.1"
     case nanoBanana2 = "Nano Banana 2"
+    case seedream55 = "Seedream 5.5"
     case seedream5Pro = "Seedream 5.0 Pro"
     case seedream5Lite = "Seedream 5.0 Lite"
     case seedream45 = "Seedream 4.5"
@@ -267,7 +268,7 @@ enum TuneBaseModel: String, CaseIterable, Identifiable, Sendable {
         case .flux: return "flux1"
         case .sdxl: return "sdxl1"
         case .sd15: return "sd15"
-        case .nanoBanana21, .nanoBanana2, .seedream5Pro, .seedream5Lite, .seedream45: return nil     // inherited from the base gallery tune
+        case .nanoBanana21, .nanoBanana2, .seedream55, .seedream5Pro, .seedream5Lite, .seedream45: return nil     // inherited from the base gallery tune
         }
     }
     /// `base_tune_id` to train on, or nil to let Astria default it from the branch (SDXL / SD1.5).
@@ -276,6 +277,7 @@ enum TuneBaseModel: String, CaseIterable, Identifiable, Sendable {
         case .flux:          return AIExtend.trainingBaseTune
         case .nanoBanana21:  return AIExtend.tuneID(for: .nanoBanana21)
         case .nanoBanana2:   return AIExtend.tuneID(for: .nanoBanana2)
+        case .seedream55:    return AIExtend.tuneID(for: .seedream55)
         case .seedream5Pro:  return AIExtend.tuneID(for: .seedream5Pro)
         case .seedream5Lite: return AIExtend.tuneID(for: .seedream5Lite)
         case .seedream45:    return AIExtend.tuneID(for: .seedream45)
@@ -286,7 +288,7 @@ enum TuneBaseModel: String, CaseIterable, Identifiable, Sendable {
     /// the rest train as LoRA (SDXL is silently switched to PTI by Astria).
     var modelType: String {
         switch self {
-        case .nanoBanana21, .nanoBanana2, .seedream5Pro, .seedream5Lite, .seedream45: return "faceid"
+        case .nanoBanana21, .nanoBanana2, .seedream55, .seedream5Pro, .seedream5Lite, .seedream45: return "faceid"
         case .flux, .sdxl, .sd15:                                                     return "lora"
         }
     }
@@ -300,6 +302,7 @@ enum TuneBaseModel: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .nanoBanana21:  return "Nano Banana 2.1 — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Nano Banana 2.1, Google's newest image model (better editing, multi-character consistency and text)."
         case .nanoBanana2:   return "Nano Banana 2 — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Nano Banana 2."
+        case .seedream55:    return "Seedream 5.5 — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Seedream 5.5, the newest Seedream (up to 3K)."
         case .seedream5Pro:  return "Seedream 5.0 Pro — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Seedream 5.0 Pro."
         case .seedream5Lite: return "Seedream 5.0 Lite — FaceID on the faster, cheaper Seedream 5.0 variant (same ~3-photo face adapter)."
         case .seedream45:    return "Seedream 4.5 — FaceID on the previous Seedream generation (same ~3-photo face adapter)."

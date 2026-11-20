@@ -497,6 +497,55 @@ number).
 Tests: `astria_cf/t.py` in the session scratchpad (scripted answers). Not run against Astria beyond the single
 unauthenticated request above. The iPhone's `AIExtend.message(from:)` still has the old catch-all wording.
 
+#### 1.13-c "Nothing is getting sent" — a second way to Astria, a connection check, Seedream 5.5 (Nov 20, 2026)
+
+After §1.13-b the Mac still couldn't generate: each request met Cloudflare's browser check, the app waited and
+tried again, and nothing reached Astria. What could be established from outside the person's Mac:
+
+- **The request itself is fine.** The app's real client and transport, with a made-up key, reached Astria every
+  time (its plain-text `401 HTTP Token: Access denied.`): a listing, a multipart prompt with a 2 MB photo, prompts
+  carrying `<faceid:…>` / `<lora:…>` mentions, quotes and script-like words, a reference tune. Nothing in the
+  headers, the User-Agent or the content draws the check.
+- **What that test can't show** is the connection underneath: the sandbox's requests leave through a proxy that
+  makes its own TLS connection, so Cloudflare never saw this Python's TLS. On the person's Mac it sees the venv's
+  Python (possibly Apple's `/usr/bin/python3`, LibreSSL 2.8) — a client Cloudflare can tell apart, and the one thing
+  that differs besides the network itself. (An earlier note here said the test showed Cloudflare "does not turn
+  this client away as such" — it showed that for the request, not for the connection.)
+
+So `mac/astria.py` now has **two ways to Astria** — `AutoTransport`, the app's one transport (`default_transport`):
+Python's networking first; **when the answer is the browser check, the same request once more through the Mac's own
+curl** (`CurlTransport`: `/usr/bin/curl --config -`, the request as a config on stdin so the key is never on a
+command line, the body a file in a private temp folder, the last header block parsed, curl's "never connected" exit
+codes → `PreSend`). A request the front door turned away never reached Astria, so nothing is made twice. Whichever
+got through is used from then on (remembered 7 days in astria.json → `route`, then Python's is tried again). The
+request is the same either way — this app's User-Agent, the person's key, Astria's documented API (whose own examples
+are curl commands): nothing is made to look like a browser, and a check that comes back **both** ways
+(`Response.route == "python+curl"`) is reported as what it then is — the network or address being checked — with
+the pause as before.
+
+**Astria Settings ▸ Check Connection** (`astria.check_connection`, `SettingsDialog._check`): one small GET each way,
+then plain lines — Python / TLS library / macOS versions, whether a key is saved (its length, never the key), what
+each way got, which the app is using, and what that means (works / only curl works → switched / both checked → the
+network / the key refused / Astria down), with Copy. The first thing to ask for when Astria "isn't working".
+Also: Astria's wrong-key answer is plain text, not JSON — `explain` now says "Astria didn't accept the API key" for
+any non-HTML 401.
+
+Untested where it matters: on a Mac whose Python is being checked. If curl is checked there too, the message and
+the check say so and the fix is outside the app (network, VPN, or Astria with the Ray number).
+
+**Seedream 5.5** (both apps): gallery tune **6000082** — read from Astria's public listing
+(`astria.ai/gallery/tunes.json?title=seedream`: "Seedream 5.5", `partner-1`, added Oct 30 2026); Astria's docs and
+changelog don't mention it yet. It's the default now, once: `astria.default_model()` (flag `default_is_55`) and the
+iPhone's `adoptSeedream55Once()` move the saved default **and** the model the Edit / Create forms remember from
+their last run (which is what they reopen on; a form left on Flux stays). Sizes: **1K / 2K / 3K** for 5.5 (the
+person's word that it goes to 3K), 1K / 2K / 4K for the rest, 5.0 Pro pinned at 2K — `astria.resolutions` /
+`fit_resolution`, `AIModel.resolutions` / `fitted(_:)`, `OutputResolution.k3`; the pickers offer only the model's
+own sizes and a size it hasn't becomes the next one down (4K → 3K on 5.5, 3K → 2K elsewhere). `prompt[resolution]`
+is sent as `"3K"` by the pattern of the other tiers — **not confirmed against Astria**; on the Mac a 400/422 that
+names the resolution is retried at 2K with a note, the iPhone shows Astria's words. Reference limit taken as 5.0
+Pro's (10). The uploaded photo is still capped at 2048 px. Added to the iPhone's tune bases too (`TuneBaseModel`).
+The Swift is not compiled here.
+
 ## 2. Find Duplicates — `DuplicatesView.swift`, `PerceptualHash.swift`
 
 Non-recursive scan of one folder. Three **independent** match kinds (never chained across each
