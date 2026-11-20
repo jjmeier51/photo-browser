@@ -65,6 +65,16 @@ REVOKE = "https://oauth2.googleapis.com/revoke"
 PUBLIC = "https://drive.usercontent.google.com/download"
 SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 CONSOLE = "https://console.cloud.google.com/apis/credentials"
+AUDIENCE = "https://console.cloud.google.com/auth/audience"            # where a project's Test users are listed
+# Google's "Access blocked: <project> has not completed the Google verification process … Error 403:
+# access_denied" is shown in the browser only — nothing comes back to the app, which would just go on waiting. It
+# means the address signing in isn't one of the project's Test users (the owner's isn't, until it's added).
+BLOCKED_HELP = ("If Google's page says “Access blocked … has not completed the Google verification process” "
+                "(Error 403: access_denied), your Google address isn't on your project's Test users list yet — "
+                "even the project's owner has to be added. In the Google Cloud Console open OAuth consent screen ▸ "
+                "Audience, press Add users under Test users, enter the address you sign in with, and save. Then "
+                "sign in again. After that Google shows “Google hasn't verified this app” — that's expected for a "
+                "project of your own: choose Continue.")
 UA = "PhotoBrowser/1.0 (macOS; Photo Browser for Mac Google Drive)"
 FOLDER = "application/vnd.google-apps.folder"
 SHORTCUT = "application/vnd.google-apps.shortcut"
@@ -79,14 +89,17 @@ SETUP_STEPS = (
     "1.  Open console.cloud.google.com and create a project (any name).\n"
     "2.  APIs & Services ▸ Library ▸ search “Google Drive API” ▸ Enable.\n"
     "3.  APIs & Services ▸ OAuth consent screen (Google also calls it “Google Auth Platform”): choose External, "
-    "give it a name and your email, and — under Audience ▸ Test users — add your own Google address. (Left in "
-    "Testing, Google asks you to sign in again every 7 days. Publishing it removes that.)\n"
+    "give it a name and your email.\n"
+    "    IMPORTANT — under Audience ▸ Test users press Add users and add the Google address you'll sign in with "
+    "(your own too). Without it Google answers “Access blocked … has not completed the Google verification "
+    "process”. (Left in Testing, Google asks you to sign in again every 7 days. Publishing it removes that.)\n"
     "4.  APIs & Services ▸ Credentials (or Google Auth Platform ▸ Clients) ▸ Create ▸ OAuth client ID ▸ Application "
     "type: Desktop app. Copy the Client ID and the Client secret into the two boxes here.\n"
     "5.  Optional — for links shared with “anyone with the link”, without signing in: Create Credentials ▸ API key, "
     "and paste it in the third box.\n\n"
-    "Then press Sign In with Google: your browser opens Google's own page, you approve read-only access, and the "
-    "window carries on. The app can only read your Drive — it can't change or delete anything there."
+    "Then press Sign In with Google: your browser opens Google's own page (“Google hasn't verified this app” is "
+    "expected for a project of your own — choose Continue), you approve read-only access, and the window carries "
+    "on. The app can only read your Drive — it can't change or delete anything there."
 )
 
 
@@ -326,7 +339,8 @@ class Auth:
         finally:
             server.server_close()
         if not got:
-            raise DriveError("Google's page never came back — the sign-in wasn't finished in the browser.")
+            raise DriveError("Google's page never came back — the sign-in wasn't finished in the browser.\n\n"
+                             + BLOCKED_HELP)
         if not got.get("code"):
             why = got.get("error") or "no code"
             raise DriveError("You didn't allow access, so nothing was signed in." if why == "access_denied"

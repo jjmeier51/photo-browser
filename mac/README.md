@@ -1367,14 +1367,17 @@ steps and opens the page):
 1. Open [console.cloud.google.com](https://console.cloud.google.com) and create a project (any name).
 2. APIs & Services ▸ Library ▸ search "Google Drive API" ▸ **Enable**.
 3. APIs & Services ▸ OAuth consent screen (also shown as "Google Auth Platform"): choose **External**, give it a
-   name and your email, and under Audience ▸ **Test users** add your own Google address.
+   name and your email, and under Audience ▸ **Test users** press Add users and add the Google address you'll
+   sign in with — **your own too**. Without it Google answers *"Access blocked: … has not completed the Google
+   verification process (Error 403: access_denied)"*; add the address and sign in again.
 4. APIs & Services ▸ Credentials (or Google Auth Platform ▸ Clients) ▸ Create ▸ **OAuth client ID** ▸ Application
    type **Desktop app**. Copy the **Client ID** and **Client secret** into Set Up….
 5. Optional: Create Credentials ▸ **API key** and paste it too — then links shared "anyone with the link" work
    without signing in.
 
-Then **Sign In with Google…**: your own browser (Safari, Chrome) opens Google's page, you approve, and the window
-carries on. The access asked for is **read-only** — the app can't change or delete anything in your Drive. The
+Then **Sign In with Google…**: your own browser (Safari, Chrome) opens Google's page — "Google hasn't verified this
+app" is expected for a project of your own, choose Continue — you approve, and the window carries on. (While it
+waits, the window says what to do about "Access blocked" and has a button for the Test users page.) The access asked for is **read-only** — the app can't change or delete anything in your Drive. The
 secret and the sign-in are kept in the Mac's Keychain. While the project is left in "Testing", Google ends the
 sign-in after 7 days and the window asks you to sign in again; publishing the project (same page) removes that.
 

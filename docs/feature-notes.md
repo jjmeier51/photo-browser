@@ -4175,6 +4175,13 @@ a shared one would need Google's verification for a restricted scope. Don't "sim
 - **Secrets**: client secret and refresh token in the Keychain (`app_identity.keychain_services("Google Drive")`,
   accounts `client-secret` / `refresh-token`); a 0600 file off the Mac. Settings (`gdrive.json` in
   `app_identity.support()`) hold only the client id, API key and the account's address. Sign Out revokes the token.
+- **"Access blocked: <project> has not completed the Google verification process — Error 403: access_denied"**
+  (met on the first real sign-in, Nov 20): the address signing in isn't in the project's **Test users** — the
+  owner's isn't either until added (Audience ▸ Test users). Google shows it in the browser and **sends nothing
+  back to the loopback listener**, so the app can't detect it: the window shows `BLOCKED_HELP` and an "Open Test
+  Users Page" button (`AUDIENCE`) while a sign-in is waiting and after one that was cancelled or timed out
+  (`unfinished`), and the setup steps say it in capitals. After the address is added, Google's "hasn't verified
+  this app" warning (Continue) is the expected page.
 - **A project left in "Testing" loses its refresh token after 7 days** — `invalid_grant` becomes `NeedsSignIn`
   with those words; the window shows signed out and says why.
 - **Planning** (`Client.plan`): folders walked to the bottom (`files.list`, 1000 a page, `supportsAllDrives`),

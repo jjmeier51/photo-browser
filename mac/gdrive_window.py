@@ -86,6 +86,11 @@ class SetupDialog(QDialog):
         console = QPushButton("Open Google Cloud Console")
         console.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(G.CONSOLE)))
         row.addWidget(console)
+        testers = QPushButton("Test Users Page")
+        testers.setToolTip("Where your Google address has to be added (step 3) — without it Google answers "
+                           "“Access blocked”")
+        testers.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(G.AUDIENCE)))
+        row.addWidget(testers)
         row.addStretch(1)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
@@ -175,6 +180,18 @@ class DriveWindow(QWidget):
         self.hint.setWordWrap(True)
         self.hint.setObjectName("SheetSub")
         v.addWidget(self.hint)
+        # Google's "Access blocked" page (the address isn't a Test user) never reaches the app: said here while
+        # the sign-in is waiting, and after one that wasn't finished
+        self.blocked = QLabel(G.BLOCKED_HELP)
+        self.blocked.setWordWrap(True)
+        self.blocked.setObjectName("SheetSub")
+        self.testers_btn = QPushButton("Open Test Users Page")
+        self.testers_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(G.AUDIENCE)))
+        blocked_row = QHBoxLayout()
+        blocked_row.addWidget(self.blocked, 1)
+        blocked_row.addWidget(self.testers_btn, 0, Qt.AlignmentFlag.AlignTop)
+        v.addLayout(blocked_row)
+        self.unfinished = False            # the last sign-in was cancelled or never came back
 
         into = QHBoxLayout()
         self.into = QLabel("")
@@ -239,6 +256,9 @@ class DriveWindow(QWidget):
             self.account.setText("Not signed in — an API key is set: links shared with “anyone with the link” work")
         else:
             self.account.setText("Not signed in")
+        trouble = self.signing_in or (self.unfinished and not signed)
+        self.blocked.setVisible(trouble)
+        self.testers_btn.setVisible(trouble)
         self.sign_btn.setText("Cancel Sign-In" if self.signing_in else "Sign In with Google…")
         self.sign_btn.setVisible(self.signing_in or not signed)
         self.out_btn.setVisible(signed and not self.signing_in)
@@ -280,8 +300,12 @@ class DriveWindow(QWidget):
 
     def _signed(self, problem: str) -> None:
         self.signing_in = False
+        never = "never came back" in problem
+        self.unfinished = problem == "cancelled" or never
         self._show_account()
-        if problem and problem != "cancelled":
+        if never:                                      # (why is on show in the window, with the button for it)
+            self._say("The sign-in wasn't finished in the browser.")
+        elif problem and problem != "cancelled":
             QMessageBox.warning(self, "Google Drive", problem)
         self.raise_()
         self.activateWindow()
