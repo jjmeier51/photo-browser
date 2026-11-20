@@ -7,7 +7,7 @@ any reference photos they pick.
 The requests are the iPhone's, field for field (feature-notes §1), so the two apps behave the same:
 - **A generation** is a multipart `POST /tunes/{tune}/prompts` (`prompt[text]`, `prompt[num_images]`,
   `prompt[aspect_ratio]` — always a concrete ratio, the nearest supported one to the photo for "Original" —
-  `prompt[resolution]` 1K/2K/4K — 1K/2K/3K on Seedream 5.5 — except on Flux, `prompt[input_image]` for an edit). The POST retries
+  `prompt[resolution]` 1K/2K/4K except on Flux, `prompt[input_image]` for an edit). The POST retries
   transient failures (429/5xx, a connection never made) with backoff, and after an *ambiguous* failure
   (the upload may have landed) it looks for the prompt among the tune's newest before posting again, so a
   billed prompt is never made twice.
@@ -17,7 +17,9 @@ The requests are the iPhone's, field for field (feature-notes §1), so the two a
   for any that failed. Every download is checked to be a picture before it counts.
 - **Models**: Seedream 5.5 (the default since Nov 20) / 5.0 Pro / 5.0 Lite / 4.5, Nano Banana Pro / 2.1 / 2,
   Flux — the same gallery tune ids (overridable), the same reference limits (14; 10 for 5.5 and 5.0 Pro; none on
-  Flux), 5.0 Pro pinned to 2K, 5.5 up to 3K (`resolutions`, `fit_resolution`).
+  Flux), 5.5 and 5.0 Pro pinned to 2K (`resolutions`, `fit_resolution`).
+- **Upscale results 2×** (the form's option, Mac only): each result enlarged with Lanczos as it comes back
+  (`upscale_2x`) — so what's shown, kept and saved is the larger picture; saved files get the "upscaled" tag.
 - **Two ways to Astria** (`AutoTransport`, Nov 20): Python's networking, and — when the front door answers that
   with its browser check — the same request through the Mac's own curl; `check_connection` asks both and says.
   **Tunes** (the account's own) combine as the iPhone does: one tune runs on its own base (or as a
@@ -75,8 +77,9 @@ MAX_RECOVERY_ATTEMPTS = 4
 MODELS: dict[str, tuple[int, int, str | None]] = {
     # Seedream 5.5 (Nov 20): id 6000082 from Astria's public gallery listing (astria.ai/gallery/tunes.json?title=
     # seedream — "Seedream 5.5", partner-1, added Oct 30 2026). Astria's docs don't describe it yet: the reference
-    # limit is taken as 5.0 Pro's (10) and its sizes as 1K / 2K / 3K (`MODEL_RESOLUTIONS`) — the person's word.
-    "Seedream 5.5": (6000082, 10, None),
+    # limit is taken as 5.0 Pro's (10). It makes 2K only (the person's word, correcting "up to 3K") — pinned, as
+    # 5.0 Pro is; for larger, the form's "Upscale results 2×" enlarges what comes back on the Mac.
+    "Seedream 5.5": (6000082, 10, "2K"),
     "Seedream 5.0 Pro": (5236038, 10, "2K"),
     "Seedream 5.0 Lite": (4160332, 14, None),
     "Seedream 4.5": (3691308, 14, None),
@@ -89,9 +92,9 @@ MODELS: dict[str, tuple[int, int, str | None]] = {
 }
 PARTNER_MODELS = [m for m in MODELS if m != "Flux"]
 DEFAULT_MODEL = "Seedream 5.5"
-RESOLUTIONS = ("1K", "2K", "3K", "4K")                    # every size tier there is, smallest first
-USUAL_RESOLUTIONS = ("1K", "2K", "4K")
-MODEL_RESOLUTIONS = {"Seedream 5.5": ("1K", "2K", "3K")}  # a model whose tiers aren't the usual three
+RESOLUTIONS = ("1K", "2K", "4K")                          # every size tier there is, smallest first
+USUAL_RESOLUTIONS = RESOLUTIONS
+MODEL_RESOLUTIONS: dict[str, tuple[str, ...]] = {}        # a model whose tiers aren't the usual three (none now)
 
 
 def resolutions(model: str) -> tuple[str, ...]:
@@ -104,7 +107,7 @@ def resolutions(model: str) -> tuple[str, ...]:
 
 def fit_resolution(model: str, wanted: str | None) -> str | None:
     """The tier to send for `model` when the person asked for `wanted`: that one when the model has it, else the
-    largest it has that isn't larger (4K on Seedream 5.5 → 3K; 3K on Nano Banana → 2K), else its smallest."""
+    largest it has that isn't larger (4K on a model pinned at 2K → 2K), else its smallest."""
     have = resolutions(model)
     if not have:
         return None
@@ -1376,19 +1379,7 @@ class Client:
             fields["prompt[resolution]"] = resolution
         files = [("prompt[input_image]", "input.jpg", "image/jpeg", image)] if image else []
         try:
-            try:
-                pid = self.create_prompt(tune, fields, files, wait)
-            except AIError as e:
-                ref = self.last_refusal
-                # "3K" is the tier's name by the pattern of 1K / 2K / 4K — Astria documents no list. If Astria
-                # doesn't know it for this model, the picture is still made, a size down, and the person told.
-                if not (resolution == "3K" and ref is not None and ref.kind == "api" and ref.status in (400, 422)
-                        and "resolution" in (e.message or "").lower()):
-                    raise
-                fields["prompt[resolution]"] = "2K"
-                pid = self.create_prompt(tune, fields, files, wait)
-                if note:
-                    note(f"Astria didn't take 3K for this model (“{e.message}”) — made at 2K instead.")
+            pid = self.create_prompt(tune, fields, files, wait)
         except AIError as e:
             if e.kind == "server" and reused:               # a remembered reference tune may be gone on Astria
                 store().update("reference_tunes", lambda d: {k: v for k, v in (d or {}).items() if k not in reused})
@@ -1628,6 +1619,37 @@ def save_edit(result: bytes, original: str, model: str = "", prompt: str = "") -
     data = _encode(result, base_exif, when, model, prompt)
     folder = ai_folder(Path(original).parent)
     return _place(data, folder, f"{Path(original).stem[:200]} AI.jpg", when)
+
+
+def upscale_2x(data: bytes) -> bytes:
+    """A result picture enlarged 2× with **Lanczos** resampling — nothing else (no sharpening, no AI): the form's
+    "Upscale results 2×". PNG stays PNG (lossless); anything else comes back a JPEG at quality 98, 4:4:4, so the
+    save's own JPEG step (`_encode`, quality 95) is the only real loss. Colour profile and EXIF kept; a rotated
+    JPEG is turned upright first. Raises ValueError / OSError when it isn't a picture Pillow can read."""
+    from PIL import Image, ImageOps
+    with Image.open(io.BytesIO(data)) as im:
+        fmt = (im.format or "").upper()
+        icc = im.info.get("icc_profile")
+        try:
+            exif = im.getexif()
+        except Exception:  # noqa: BLE001 — EXIF Pillow can't parse: none is carried
+            exif = None
+        im = ImageOps.exif_transpose(im)
+        if im.mode not in ("RGB", "RGBA", "L"):
+            im = im.convert("RGBA" if "A" in im.getbands() else "RGB")
+        big = im.resize((im.width * 2, im.height * 2), Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        if fmt == "PNG":
+            big.save(out, "PNG", icc_profile=icc)
+        else:
+            if big.mode != "RGB":
+                big = big.convert("RGB")
+            extra = {}
+            if exif is not None and len(exif):
+                exif[0x0112] = 1                             # upright now
+                extra["exif"] = exif.tobytes()
+            big.save(out, "JPEG", quality=98, subsampling=0, icc_profile=icc, **extra)
+        return out.getvalue()
 
 
 def _safe_name(s: str) -> str:
@@ -1926,6 +1948,11 @@ def resume_pending(client: Client, busy: set[str] | None = None, max_ticks: int 
             continue
         saved = []
         for data in images:
+            if job.get("upscale"):                           # the form's "Upscale results 2×", asked before the quit
+                try:
+                    data = upscale_2x(data)
+                except (OSError, ValueError):
+                    pass
             try:
                 if job.get("source"):
                     saved.append(save_edit(data, job["source"], job.get("model", ""), job.get("prompt", "")))

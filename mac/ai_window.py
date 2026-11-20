@@ -4,8 +4,8 @@
 - **Edit with AI** (right-click a photo) / **Create with AI** (right-click a folder): the prompt (with an
   optional negative prompt, the prompting reminder, the two reusable prompts, and the prompt history with
   hearts), the model and up to ten of your own tunes (only the ones that can run on that model), reference
-  photos (up to the model's limit — any photos on the Mac or the drive), resolution (1K/2K/4K; 1K/2K/3K on Seedream 5.5; Seedream 5.0
-  Pro is 2K), dimensions (Original keeps the photo's shape) and how many. Everything is remembered for next
+  photos (up to the model's limit — any photos on the Mac or the drive), resolution (1K/2K/4K; Seedream 5.5 and 5.0
+  Pro are 2K), dimensions (Original keeps the photo's shape) and how many. Everything is remembered for next
   time, per flow. Generate closes the form and opens the job's window.
 - **A job's window** shows where it's at ("2 of 4 ready…"), then the results: each one kept unless clicked
   (a click marks it to throw away), double-click to see it full size. **Save** puts the kept ones in the
@@ -257,10 +257,21 @@ class Job:
     folder: str = ""                               # a creation's folder
     references: list[str] = field(default_factory=list)
     settings: dict = field(default_factory=dict)   # the form, for Run Again
+    upscale: bool = False                          # "Upscale results 2×": each result enlarged (Lanczos) as it arrives
     images: list[bytes] = field(default_factory=list)
     error: A.AIError | None = None
     note: str = ""
     done: bool = False
+
+
+def _tag_upscaled(hooks, job: "Job", paths: list[str]) -> None:
+    """Results enlarged by "Upscale results 2×" get the "upscaled" tag once they're files — as everything the app
+    upscales does."""
+    if job.upscale and paths and getattr(hooks, "add_tags", None) is not None:
+        try:
+            hooks.add_tags(list(paths), ["upscaled"])
+        except Exception:  # noqa: BLE001 — a tag that couldn't be written never loses a saved picture
+            pass
 
 
 class Jobs(QObject):
@@ -314,7 +325,7 @@ class Jobs(QObject):
             def on_prompt(pid: int) -> None:
                 A.note_pending({"job": job.id, "prompt_id": pid, "tune": job.gen.tune_id, "count": job.count,
                                 "source": job.source, "folder": job.folder, "model": job.model_label,
-                                "prompt": job.prompt, "started": time.time()})
+                                "prompt": job.prompt, "started": time.time(), "upscale": job.upscale})
 
             def beat(ready: int, want: int | None) -> None:
                 self.progress.emit(job.id, f"Astria is working on it — {ready} of {want or job.count} ready…"
@@ -325,7 +336,20 @@ class Jobs(QObject):
             job.images = client.generate(job.gen.tune_id, job.prompt, image, job.count, w, h, job.aspect,
                                          job.resolution, job.gen.token, refs, on_prompt, beat, note,
                                          wait=lambda text: self.progress.emit(job.id, text))
-            if len(job.images) < job.count:
+            short = len(job.images) < job.count
+            if job.upscale and job.images:
+                missed = 0
+                for i, data in enumerate(job.images):
+                    self.progress.emit(job.id, f"Enlarging the results 2× — {i + 1} of {len(job.images)}…")
+                    try:
+                        job.images[i] = A.upscale_2x(data)
+                    except Exception:  # noqa: BLE001 — a result that can't be enlarged is kept as it came
+                        missed += 1
+                if missed:
+                    job.note = (job.note + " " if job.note else "") + \
+                        f"{missed} result{'s' if missed != 1 else ''} couldn't be enlarged and came as Astria made " \
+                        f"{'them' if missed != 1 else 'it'}."
+            if short:
                 job.note = (job.note + " " if job.note else "") + \
                     f"Astria returned {len(job.images)} of {job.count} images."
         except A.AIError as e:
@@ -533,7 +557,8 @@ class RequestWindow(QWidget):
         self.refs = [p for p in s.get("references", []) if os.path.exists(p) and p not in self.targets]
         v.addWidget(self._head("Output"))
         form = QFormLayout()
-        self.res_box, self.res = _seg(self, list(A.RESOLUTIONS), s.get("resolution", "2K"))
+        self.res_box, self.res = _seg(self, list(A.RESOLUTIONS),
+                                      s.get("resolution") if s.get("resolution") in A.RESOLUTIONS else "2K")
         self.res_wanted = _checked(self.res)               # the tier last asked for (a model may not have it)
         self.res.buttonClicked.connect(lambda b: setattr(self, "res_wanted", b.text()))
         form.addRow("Resolution", self.res_box)
@@ -542,6 +567,13 @@ class RequestWindow(QWidget):
         form.addRow("Dimensions", self.asp_box)
         self.cnt_box, self.cnt = _seg(self, [str(c) for c in A.COUNTS], str(s.get("count", 1)))
         form.addRow("How many", self.cnt_box)
+        self.upscale = QCheckBox("Upscale results 2× (Lanczos)")
+        self.upscale.setChecked(bool(s.get("upscale2x", False)))
+        self.upscale.setToolTip("Each result is enlarged to twice its width and height on this Mac as it comes back "
+                                "(Lanczos resampling — no AI, no extra cost on Astria): a 2K result is saved as 4K. "
+                                "Saved files get the “upscaled” tag.")
+        self.upscale.toggled.connect(lambda _on: self._update())
+        form.addRow("", self.upscale)
         v.addLayout(form)
         v.addStretch(1)
         scroll.setWidget(body)
@@ -716,6 +748,8 @@ class RequestWindow(QWidget):
             note = f"{gen.label} — Flux takes no resolution choice."
         elif pinned:
             note = f"{gen.label} — always {pinned} on Astria."
+            if getattr(self, "upscale", None) is not None and not self.upscale.isChecked():
+                note += " “Upscale results 2×” below makes them larger on this Mac."
         elif have != A.USUAL_RESOLUTIONS:
             note = f"Runs on {gen.label} — up to {have[-1]}."
         else:
@@ -784,7 +818,8 @@ class RequestWindow(QWidget):
     def form(self) -> dict:
         return {"prompt": self.prompt.toPlainText(), "negative_on": self.neg_on.isChecked(), "negative": self.neg.text(),
                 "model": self.model.currentText(), "tunes": list(self.picked_tunes), "references": list(self.refs),
-                "resolution": _checked(self.res), "aspect": _checked(self.asp), "count": int(_checked(self.cnt) or 1)}
+                "resolution": _checked(self.res), "aspect": _checked(self.asp), "count": int(_checked(self.cnt) or 1),
+                "upscale2x": self.upscale.isChecked()}
 
     def generate(self) -> Job | None:
         s = self.form()
@@ -805,7 +840,7 @@ class RequestWindow(QWidget):
                 return None
             refs = list(s["references"]) if A.MODELS[model][1] else []
             batch = [Job(uuid.uuid4().hex, "edit", text, gen.label, gen, s["count"], aspect, resolution, source=path,
-                         references=refs, settings=s) for path in self.targets]
+                         references=refs, settings=s, upscale=s["upscale2x"]) for path in self.targets]
             win = BatchResultsWindow(batch, self.hooks, self.theme, self.parentWidget())
             if self.hooks.keep_open:
                 self.hooks.keep_open(win)
@@ -817,7 +852,8 @@ class RequestWindow(QWidget):
         job = Job(uuid.uuid4().hex, self.mode, text, gen.label, gen, s["count"], aspect, resolution,
                   source=self.target if self.mode == "edit" else "",
                   folder=self.target if self.mode == "create" else "",
-                  references=list(s["references"]) if A.MODELS[model][1] else [], settings=s)
+                  references=list(s["references"]) if A.MODELS[model][1] else [], settings=s,
+                  upscale=s["upscale2x"])
         win = ResultsWindow(job, self.hooks, self.theme, self.parentWidget())
         if self.hooks.keep_open:
             self.hooks.keep_open(win)
@@ -1058,6 +1094,7 @@ class ResultsWindow(QWidget):
                 self.state.setText(f"Couldn't save one: {e}")
         if out and self.job.mode == "edit" and self.hooks.carry_tags is not None:
             self.hooks.carry_tags([(self.job.source, p) for p in out])
+        _tag_upscaled(self.hooks, self.job, out)
         if not failed:
             A.drop_pending(self.job.id)                      # only once every kept result is on the drive: they were paid for
         out = [t.saved_to for t in self.tiles if getattr(t, "saved_to", "")]
@@ -1372,7 +1409,8 @@ class BatchResultsWindow(QWidget):
         if old is None or sec is None or self.saved:
             return
         new = Job(uuid.uuid4().hex, "edit", old.prompt, old.model_label, old.gen, old.count, old.aspect,
-                  old.resolution, source=old.source, references=list(old.references), settings=old.settings)
+                  old.resolution, source=old.source, references=list(old.references), settings=old.settings,
+                  upscale=old.upscale)
         at = self.col.indexOf(sec)
         self.batch[self.batch.index(old)] = new
         self.sections.pop(jid, None)
@@ -1400,6 +1438,7 @@ class BatchResultsWindow(QWidget):
                     self.sections[job.id].state.setText(f"Couldn't save one: {e}")
             if made and self.hooks.carry_tags is not None:
                 self.hooks.carry_tags([(job.source, p) for p in made])
+            _tag_upscaled(self.hooks, job, made)
             A.drop_pending(job.id)
             photos += bool(made)
             out += made
@@ -1519,6 +1558,7 @@ class BatchResultsWindow(QWidget):
                         missed += 1
             if made and self.hooks.carry_tags is not None:
                 self.hooks.carry_tags([(job.source, p) for p in made])
+            _tag_upscaled(self.hooks, job, made)
             if not missed:
                 A.drop_pending(job.id)                       # a job whose results couldn't all be written is kept
             self.unwritten = getattr(self, "unwritten", 0) + missed

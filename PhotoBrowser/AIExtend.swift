@@ -64,7 +64,7 @@ enum AIExtend {
         /// (the same reading gave the five ids above correctly) — it can be overridden in Settings.
         /// Seedream 5.5 (Nov 20, 2026): 6000082, from Astria's public gallery listing
         /// (astria.ai/gallery/tunes.json?title=seedream — "Seedream 5.5", added Oct 30). Astria's docs
-        /// don't describe it yet, so its reference limit is taken as 5.0 Pro's and its sizes as 1K/2K/3K.
+        /// don't describe it yet, so its reference limit is taken as 5.0 Pro's; it makes 2K only.
         var fallbackTune: Int {
             switch self {
             case .seedream55:    return 6000082
@@ -92,21 +92,10 @@ enum AIExtend {
             case .flux:                                                    return 0
             }
         }
-        /// The output tier a model is pinned to, or nil for the user's choice. Seedream 5.0 Pro tops out
-        /// at 2K on Astria, so it always generates at 2K whatever the picker held (the picker is
-        /// disabled and shows 2K while it's selected).
-        var fixedResolution: OutputResolution? { self == .seedream5Pro ? .k2 : nil }
-        /// The output tiers the model offers, smallest first: Seedream 5.5 makes up to 3K (1K / 2K / 3K),
-        /// the others 1K / 2K / 4K. (A pinned model lists them too — its picker is disabled.)
-        var resolutions: [OutputResolution] { self == .seedream55 ? [.k1, .k2, .k3] : [.k1, .k2, .k4] }
-        /// The tier to send when the picker holds `wanted`: the pinned one; else `wanted` when the model
-        /// has it; else the largest it has that isn't larger (4K → 3K on Seedream 5.5, 3K → 2K elsewhere).
-        func fitted(_ wanted: OutputResolution) -> OutputResolution {
-            if let fixed = fixedResolution { return fixed }
-            let have = resolutions
-            if have.contains(wanted) { return wanted }
-            return have.last(where: { $0.rank <= wanted.rank }) ?? have[0]
-        }
+        /// The output tier a model is pinned to, or nil for the user's choice. Seedream 5.5 and 5.0 Pro
+        /// make 2K only on Astria, so they always generate at 2K whatever the picker held (the picker
+        /// is disabled and shows 2K while one is selected).
+        var fixedResolution: OutputResolution? { (self == .seedream55 || self == .seedream5Pro) ? .k2 : nil }
         fileprivate var tuneKey: String { "photoBrowser.astriaTune.\(rawValue)" }
         /// The partner models offered as the built-in default / Settings overrides (Flux is offered
         /// only in the Edit/Create pickers, and shares the separate Flux tune setting).
@@ -135,23 +124,13 @@ enum AIExtend {
     private static let referenceTunesKey = "photoBrowser.astriaReferenceTunes"
 
     /// Output resolution the user picks. Sent as Astria's `prompt[resolution]` size **tier**
-    /// (1K / 2K / 4K — and 3K, which only Seedream 5.5 offers: `AIModel.resolutions`) — the
-    /// documented way to control output size on the gallery tunes. (The old
+    /// (1K / 2K / 4K) — the documented way to control output size on the gallery tunes. (The old
     /// path only set `super_resolution` for 4K, which Nano Banana 2 ignored, so it capped at 2K.)
     /// The uploaded input is still capped at 2048 px (the tune's input limit); the tier drives the
     /// generated size.
     enum OutputResolution: String, CaseIterable, Identifiable, Sendable {
-        case k1 = "1K", k2 = "2K", k3 = "3K", k4 = "4K"
+        case k1 = "1K", k2 = "2K", k4 = "4K"
         var id: String { rawValue }
-        /// Smallest to largest, for stepping down to a tier a model has (`AIModel.fitted`).
-        var rank: Int {
-            switch self {
-            case .k1: return 1
-            case .k2: return 2
-            case .k3: return 3
-            case .k4: return 4
-            }
-        }
         /// Long side (px) of the uploaded input. Capped at 2048 — the tune limit.
         var uploadLongSide: CGFloat { self == .k1 ? 1024 : 2048 }
         /// Value for `prompt[resolution]` — the output size tier.

@@ -75,7 +75,7 @@ struct AICreateView: View {
                 referenceSection
                 Section {
                     Picker("Resolution", selection: $resolution) {
-                        ForEach(model.resolutions) { Text($0.rawValue).tag($0) }
+                        ForEach(AIExtend.OutputResolution.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
                     .disabled(model.fixedResolution != nil)
@@ -88,8 +88,6 @@ struct AICreateView: View {
                 } footer: {
                     if let fixed = model.fixedResolution {
                         Text("\(model.rawValue) always generates at \(fixed.rawValue) — the most Astria supports for it.")
-                    } else if model == .seedream55 {
-                        Text("Seedream 5.5 makes images up to 3K.")
                     }
                 }
                 Section {
@@ -111,11 +109,10 @@ struct AICreateView: View {
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
             // A model with a smaller reference limit keeps the first N picked.
-            // The picker only offers the model's own sizes (3K is Seedream 5.5's; 4K the others').
-            .onAppear { resolution = model.fitted(resolution) }
+            .onAppear { if let fixed = model.fixedResolution { resolution = fixed } }
             .onChange(of: model) { _, m in
                 if referenceURLs.count > m.maxReferenceImages { referenceURLs = Array(referenceURLs.prefix(m.maxReferenceImages)) }
-                resolution = m.fitted(resolution)
+                if let fixed = m.fixedResolution { resolution = fixed }
             }
             .task {
                 tunes = await library.loadAITunes()
@@ -186,7 +183,7 @@ struct AICreateView: View {
 
     private func generate() {
         guard AIExtend.isConfigured else { showSettings = true; return }
-        let res = model.fitted(resolution)                 // Seedream 5.0 Pro is always 2K; 5.5 tops out at 3K
+        let res = model.fixedResolution ?? resolution      // Seedream 5.5 and 5.0 Pro are always 2K
         // Remember these settings so the sheet reopens pre-filled the same way after review.
         AIExtend.saveRunSettings(AIExtend.RunSettings(prompt: prompt, model: model.rawValue,
                                                       tuneIDs: selectedTunes.map(\.id),

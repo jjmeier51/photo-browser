@@ -1587,6 +1587,11 @@ sent anywhere, and then only the photo you're editing and any reference photos y
 the Mac's Keychain (every AI window asks for it the first time; **Astria Settings…** changes it, the default
 model and the models' tune ids).
 
+- **Upscale results 2× (Lanczos).** A tick under "How many" in the Edit and Create forms: every result is
+  enlarged to twice its width and height on this Mac as it comes back from Astria — a 2K result becomes 4K —
+  with plain Lanczos resampling (no AI, no sharpening, and nothing extra charged by Astria). The results
+  window shows the enlarged pictures and that's what Save writes; saved files get the **upscaled** tag. The
+  choice is remembered, and results picked up after the app was quit mid-generation are enlarged too.
 - **If nothing reaches Astria.** Open **Astria Settings…** (the button in any AI window) and press **Check
   Connection**: it asks Astria one small question each of the two ways the app can reach it — Python's own
   networking and the Mac's built-in `curl` — and says in plain lines what each got and what that means; **Copy**
@@ -1607,8 +1612,8 @@ model and the models' tune ids).
   prompts (double-click to reuse; right-click to ♥ one — hearted prompts are never dropped) are right there.
   Pick the model — **Seedream 5.5** (the default), Seedream 5.0 Pro / 5.0 Lite / 4.5, Nano Banana Pro / 2.1 / 2,
   or Flux — and up to ten of your own tunes (only the ones that can run on that model are listed), reference
-  photos (any photos; up to 10 or 14, none on Flux), resolution (1K/2K/4K — **1K/2K/3K on Seedream 5.5**,
-  Seedream 5.0 Pro is always 2K, Flux takes none; a size a model doesn't have is greyed out), the shape
+  photos (any photos; up to 10 or 14, none on Flux), resolution (1K/2K/4K — **Seedream 5.5 and 5.0 Pro are
+  always 2K**, Flux takes none; a size a model doesn't have is greyed out), the shape
   (Original keeps the photo's) and how many (1–8). Everything is remembered for next time.
 - **Several photos, one prompt.** Select the photos (2, 5, 30…), right-click ▸ **Edit N Photos with AI…**, and
   write the prompt once — "Remove the bookshelf behind Johnny". **Generate for N Photos** sends each photo to

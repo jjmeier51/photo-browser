@@ -302,7 +302,7 @@ enum TuneBaseModel: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .nanoBanana21:  return "Nano Banana 2.1 — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Nano Banana 2.1, Google's newest image model (better editing, multi-character consistency and text)."
         case .nanoBanana2:   return "Nano Banana 2 — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Nano Banana 2."
-        case .seedream55:    return "Seedream 5.5 — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Seedream 5.5, the newest Seedream (up to 3K)."
+        case .seedream55:    return "Seedream 5.5 — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Seedream 5.5, the newest Seedream."
         case .seedream5Pro:  return "Seedream 5.0 Pro — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Seedream 5.0 Pro."
         case .seedream5Lite: return "Seedream 5.0 Lite — FaceID on the faster, cheaper Seedream 5.0 variant (same ~3-photo face adapter)."
         case .seedream45:    return "Seedream 4.5 — FaceID on the previous Seedream generation (same ~3-photo face adapter)."

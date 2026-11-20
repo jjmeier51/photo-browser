@@ -249,9 +249,10 @@ actions the app makes no network calls.
   **Two ways to Astria** (`AutoTransport`): Python's networking, and — when the front door answers that with its
   browser check — the same request through the Mac's own curl (`CurlTransport`; key never on a command line);
   never make a request look like a browser's. Astria Settings ▸ **Check Connection** (`check_connection`) says what
-  each way gets. **Seedream 5.5** (tune 6000082) is the default on both apps and offers 1K / 2K / 3K
-  (`astria.resolutions` / `fit_resolution`, `AIModel.resolutions` / `fitted`); "3K" as the value is unconfirmed —
-  §1.13-c.
+  each way gets. **Seedream 5.5** (tune 6000082) is the default on both apps, **pinned at 2K** like 5.0 Pro
+  (`MODELS[...][2]`, `AIModel.fixedResolution`; there is no 3K tier) — §1.13-c. Mac only: the form's **Upscale
+  results 2× (Lanczos)** (`astria.upscale_2x`, `Job.upscale`, kept in the pending record so a recovery enlarges
+  too; saved files tagged "upscaled" via `_tag_upscaled`) — pure Lanczos, nothing added — §1.13-d.
   **Save / Save All and Run Again close the results window** (said in a toast; kept-but-unsaved results are asked
   about once on Run Again, `ai/run_again_unsaved`).
   **Several photos, one prompt** (select photos ▸ Edit N Photos with AI…): a job per photo with the same prompt and

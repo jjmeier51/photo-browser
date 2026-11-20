@@ -537,14 +537,32 @@ the check say so and the fix is outside the app (network, VPN, or Astria with th
 (`astria.ai/gallery/tunes.json?title=seedream`: "Seedream 5.5", `partner-1`, added Oct 30 2026); Astria's docs and
 changelog don't mention it yet. It's the default now, once: `astria.default_model()` (flag `default_is_55`) and the
 iPhone's `adoptSeedream55Once()` move the saved default **and** the model the Edit / Create forms remember from
-their last run (which is what they reopen on; a form left on Flux stays). Sizes: **1K / 2K / 3K** for 5.5 (the
-person's word that it goes to 3K), 1K / 2K / 4K for the rest, 5.0 Pro pinned at 2K — `astria.resolutions` /
-`fit_resolution`, `AIModel.resolutions` / `fitted(_:)`, `OutputResolution.k3`; the pickers offer only the model's
-own sizes and a size it hasn't becomes the next one down (4K → 3K on 5.5, 3K → 2K elsewhere). `prompt[resolution]`
-is sent as `"3K"` by the pattern of the other tiers — **not confirmed against Astria**; on the Mac a 400/422 that
-names the resolution is retried at 2K with a note, the iPhone shows Astria's words. Reference limit taken as 5.0
-Pro's (10). The uploaded photo is still capped at 2048 px. Added to the iPhone's tune bases too (`TuneBaseModel`).
-The Swift is not compiled here.
+their last run (which is what they reopen on; a form left on Flux stays). **It makes 2K only** — pinned, exactly as
+5.0 Pro is (`MODELS["Seedream 5.5"][2] == "2K"`, `AIModel.fixedResolution`); the first version of this offered
+1K / 2K / 3K on the word that it went to 3K, which was corrected the same day — the 3K tier, `OutputResolution.k3`,
+`AIModel.resolutions` / `fitted` and the Mac's "3K refused → 2K" retry are gone again, and the iPhone's Edit / Create
+views are back to what they were. `astria.resolutions` / `fit_resolution` stay (a remembered 4K on a pinned model
+→ 2K). Reference limit taken as 5.0 Pro's (10). Added to the iPhone's tune bases too (`TuneBaseModel`). The Swift
+is not compiled here.
+
+#### 1.13-d Upscale results 2× (Lanczos) — Mac (Nov 20, 2026)
+
+With the default model fixed at 2K, the Edit / Create forms have a tick under "How many": **Upscale results 2×
+(Lanczos)** (`RequestWindow.upscale`, remembered as `upscale2x` in the run's settings). `Job.upscale` → in
+`Jobs._generate`, once Astria's pictures are in, each is replaced by `astria.upscale_2x(data)` (the job's status
+says "Enlarging the results 2× — 1 of 4…"), so the results window shows, and Save writes, the enlarged picture.
+
+- **Pure Lanczos**, as asked: `Image.resize((2w, 2h), Image.Resampling.LANCZOS)` and nothing else — not
+  `upscale_methods`' Clean / Sharp (those smooth or sharpen), no AI. A PNG stays a PNG; anything else comes back a
+  JPEG at quality 98, 4:4:4, so the save's own JPEG step (`_encode`, 95) is the only real loss; a JPEG with a
+  rotation flag is turned upright first; colour profile and EXIF carried.
+- One that can't be enlarged is kept as Astria made it and the job's note says how many.
+- The pending record carries `upscale`, so results picked up after a quit (`resume_pending`) are enlarged too.
+- Saved files get the **"upscaled"** tag (`_tag_upscaled` → `AIHooks.add_tags`, at the three save sites) — not the
+  recovered ones, which are saved without the window's hooks.
+- The Astria.ai Browser's downloads are untouched (they stay the file as Astria made it, §6aj).
+
+Tests: `astria_live/t6.py` in the session scratchpad (the result compared with Pillow's Lanczos pixel for pixel).
 
 ## 2. Find Duplicates — `DuplicatesView.swift`, `PerceptualHash.swift`
 
