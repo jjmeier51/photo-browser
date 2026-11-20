@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QComboBox, QFileDialog, QFra
 
 import astria as A
 import search_query
-from ai_window import CLIENT, AIHooks, KeyRow, SettingsDialog, _small, _style
+from ai_window import CLIENT, AIHooks, KeyRow, SettingsDialog, _door, _small, _style
 
 AI_TAG = "AI"
 PAGE = 50                              # prompts asked for at a time
@@ -496,6 +496,7 @@ class BrowserWindow(QWidget):
     def __init__(self, folder: str, hooks: AIHooks, theme, parent=None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        _door()                                              # the browser-window way to Astria, should it be needed
         self.folder, self.hooks, self.theme = folder, hooks, theme
         self.dest = Destination(lambda: (hooks.current_folder() if hooks.current_folder else "") or self.folder)
         self.prompts: dict[int, A.Prompt] = {}

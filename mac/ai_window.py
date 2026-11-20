@@ -162,6 +162,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        _door()
         self.setWindowTitle("Astria Settings")
         v = QVBoxLayout(self)
         form = QFormLayout()
@@ -384,9 +385,20 @@ _JOBS: Jobs | None = None
 
 def jobs() -> Jobs:
     global _JOBS
+    _door()
     if _JOBS is None:
         _JOBS = Jobs()
     return _JOBS
+
+
+def _door() -> None:
+    """The browser-window way to Astria (astria_door.py), made ready on the window's thread — for when Cloudflare
+    checks the network's address and only the person can answer. Costs nothing until it's needed."""
+    try:
+        import astria_door
+        astria_door.ensure()
+    except Exception:  # noqa: BLE001 — no web engine in this run: the two direct ways remain
+        pass
 
 
 # ----------------------------------------------------------------------------- the form

@@ -248,8 +248,11 @@ actions the app makes no network calls.
   again only when it can't have reached Astria (after a gateway answer, `find_recent_prompt` first) — §1.13-b.
   **Two ways to Astria** (`AutoTransport`): Python's networking, and — when the front door answers that with its
   browser check — the same request through the Mac's own curl (`CurlTransport`; key never on a command line);
-  never make a request look like a browser's. Astria Settings ▸ **Check Connection** (`check_connection`) says what
-  each way gets. **Seedream 5.5** (tune 6000082) is the default on both apps, **pinned at 2K** like 5.0 Pro
+  never make a request look like a browser's. **When both are checked it's the address**: the third way is
+  `mac/astria_door.py` — a window with a real browser on api.astria.ai where **the person** answers Cloudflare's
+  check, the requests then made by that browser (`AutoTransport.browser`, `set_browser_route`, made by
+  `ai_window._door()`; never answer or skip the check in code) — §1.13-e. Astria Settings ▸ **Check Connection**
+  (`check_connection`) says what each way gets and opens that window when it's needed. **Seedream 5.5** (tune 6000082) is the default on both apps, **pinned at 2K** like 5.0 Pro
   (`MODELS[...][2]`, `AIModel.fixedResolution`; there is no 3K tier) — §1.13-c. Mac only: the form's **Upscale
   results 2× (Lanczos)** (`astria.upscale_2x`, `Job.upscale`, kept in the pending record so a recovery enlarges
   too; saved files tagged "upscaled" via `_tag_upscaled`) — pure Lanczos, nothing added — §1.13-d.

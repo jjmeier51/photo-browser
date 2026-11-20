@@ -564,6 +564,51 @@ says "Enlarging the results 2× — 1 of 4…"), so the results window shows, an
 
 Tests: `astria_live/t6.py` in the session scratchpad (the result compared with Pillow's Lanczos pixel for pixel).
 
+#### 1.13-e Both direct ways checked: a browser window where the person answers (Mac, Nov 20, 2026)
+
+Check Connection from the person's Mac (Python 3.14.7 / OpenSSL 3.6.4, macOS 27.0.1): **both** ways — Python's
+networking and the Mac's curl — got Cloudflare's "Just a moment…" check (HTTP 403, Ray …-ATL). So it isn't Python's
+TLS (curl is the system's): Cloudflare is checking **the network's address**, and that check is one only a person in
+a browser can answer. The app can't and mustn't answer it — but the person can.
+
+`mac/astria_door.py` — the third way (`AutoTransport.browser`, handed over by `astria.set_browser_route` once Qt is
+up; `astria.py` stays Qt-free). A small window, "Astria — Cloudflare's check", holding a real browser (Qt WebEngine,
+its own persistent profile "astria") on `api.astria.ai`:
+
+- When python **and** curl are both checked (`route "python+curl"`), the request goes to the door. It asks a small
+  question without the key (`PROBE`: `fetch(/tunes?limit=1)` from the page); if that's the check, the window comes
+  up with the check in it and one line of explanation, and the probe repeats every 1.5 s. **The person answers the
+  check**; the window hides itself and the request is sent — by that browser (`fetch` from its page: its own
+  connection, cookies and User-Agent, the person's key as the Authorization header), the body carried over in
+  ~384 KB pieces, the answer back as status + headers + base64. From then on the browser way is the app's
+  (`_prefer("browser")`, remembered 7 days); when the clearance runs out the window simply asks again.
+- **Not Now** / closing the window / no answer in `CHECK_WAIT` (3 min): the check's own answer is handed back
+  (`route "python+curl+browser"`), `create_prompt` stops there instead of pausing and asking three more times, the
+  message says to answer the check via Check Connection or use another network, and the window doesn't offer itself
+  again for `DECLINED_FOR` (2 min) unless Check Connection `insist`s.
+- **Check Connection** goes on to this window by itself when both direct ways are checked, and reports the third
+  line ("Through the browser window: …").
+- Details that matter: the page sits on `/tunes?limit=1` (Astria's own short answer — never `/`, which may redirect
+  off the origin; `MAX_LOADS` stops a loop); scripts run in Qt's *application world* so the key isn't readable by
+  the page's scripts; `User-Agent` is not set (the browser's own stands — nothing is made to look like something
+  else); one request at a time, from the jobs' threads only (`BrowserTransport.send` refuses the window's own
+  thread rather than wait on itself); only `astria.BASE` addresses go this way — result pictures are fetched as
+  before; a failure after the fetch started is `Ambiguous`. `Gate.passed()` now also ends a pause still running.
+- The door is made by `ai_window._door()` (from `jobs()`, Astria Settings, the Astria.ai Browser, Train on Astria)
+  and costs nothing until a request needs it.
+
+Why this is all right: it's what the app's downloaders already do with a site's check — the person answers it, in
+a browser they can see — here for the person's own paid API account. What it doesn't do: solve or skip the check,
+or dress the app's requests up as a browser's.
+
+Tests: `astria_door_t/t.py` in the session scratchpad — a stand-in front door that hands out the check until a
+button in the page is pressed (the window comes up, the press lets the request through, a 2.3 MB multipart upload
+arrives byte for byte, clearance running out brings the window back, Not Now, Check Connection). **Not tried
+against Cloudflare itself**: whether its real check completes inside Qt WebEngine is unknown (tikwm's did not, for
+the TikTok downloader). If it doesn't, what's left is outside the app: another network, or Astria's support with
+the Ray numbers. Likely cause of the address being checked at all: Cloudflare scores an address across every site
+it fronts, and this one has done a great deal of automated downloading.
+
 ## 2. Find Duplicates — `DuplicatesView.swift`, `PerceptualHash.swift`
 
 Non-recursive scan of one folder. Three **independent** match kinds (never chained across each

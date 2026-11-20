@@ -595,6 +595,11 @@ class ModelsWindow(QWidget):
                 f"In prompts it will be “{token} {m.word}”.") != QMessageBox.StandardButton.Yes:
             return
         self._begin(f"Uploading {len(m.photos)} photos to Astria…")
+        try:
+            import ai_window
+            ai_window._door()                                # the browser-window way to Astria, should it be needed
+        except Exception:  # noqa: BLE001
+            pass
 
         def work() -> None:
             try:

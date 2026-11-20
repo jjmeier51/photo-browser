@@ -594,17 +594,36 @@ class AutoTransport(Transport):
     documented API. When both ways are checked (`route` "python+curl"), it's the network that's being checked,
     and the message says so."""
 
-    def __init__(self, first: Transport | None = None, second: Transport | None = None, remember: bool = True) -> None:
+    def __init__(self, first: Transport | None = None, second: Transport | None = None, remember: bool = True,
+                 browser: Transport | None = None) -> None:
         self.python = first or Transport()
         self.curl = second if second is not None else CurlTransport()
+        # The third way (Nov 20): a browser window on this Mac in which **the person** answers Cloudflare's check,
+        # the requests then made by that browser (astria_door.py — set with `set_browser_route` once Qt is up).
+        # For when both direct ways are checked: the address itself is, and only a person can answer that.
+        self.browser = browser
         self.remember = remember
         self.lock = threading.Lock()
         self.use = "python"
         if remember:
             kept = store().get("route", {}) or {}
-            if kept.get("use") == "curl" and time.time() - float(kept.get("at", 0)) < ROUTE_DAYS * 86400 \
-                    and getattr(self.curl, "curl", True):
+            fresh = time.time() - float(kept.get("at", 0)) < ROUTE_DAYS * 86400
+            if kept.get("use") == "curl" and fresh and getattr(self.curl, "curl", True):
                 self.use = "curl"
+            elif kept.get("use") == "browser" and fresh:
+                self.use = "browser"                         # (used once the window's route is there)
+
+    def _by_browser(self, method: str, url: str, headers: dict, body: bytes | None, timeout: float) -> Response | None:
+        """The request through the browser window → its answer, or None when that way isn't there (no window
+        system, another host) or the person didn't answer the check — the caller goes on without it."""
+        if self.browser is None or not url.startswith(BASE):
+            return None
+        try:
+            r = self.browser.send(method, url, headers, body, timeout)
+        except Transport.PreSend:
+            return None
+        r.route = "browser"
+        return r
 
     def _prefer(self, use: str) -> None:
         with self.lock:
@@ -616,6 +635,12 @@ class AutoTransport(Transport):
             store().set("route", {"use": use, "at": time.time()})
 
     def send(self, method: str, url: str, headers: dict, body: bytes | None, timeout: float) -> Response:
+        asked_browser = False
+        if self.use == "browser":
+            asked_browser = True
+            r = self._by_browser(method, url, headers, body, timeout)
+            if r is not None and (200 <= r.status < 300 or explain(r).kind != "challenge"):
+                return r                                     # (else: the direct ways, in case the address is clear again)
         order = [("curl", self.curl), ("python", self.python)] if self.use == "curl" else \
             [("python", self.python), ("curl", self.curl)]
         name, way = order[0]
@@ -643,6 +668,17 @@ class AutoTransport(Transport):
             self._prefer(other)
             return r2
         r.route = "python+curl"
+        if not asked_browser:                                # both checked: it's the address — the person's turn
+            r3 = self._by_browser(method, url, headers, body, timeout)
+            if r3 is not None and (200 <= r3.status < 300 or explain(r3).kind != "challenge"):
+                _route_note(f"{method} {url.replace(BASE, '')}: python and curl were met with the browser check; "
+                            f"the browser window got HTTP {r3.status}")
+                self._prefer("browser")
+                return r3
+            if r3 is not None:
+                r.route = "python+curl+browser"
+        elif self.browser is not None and url.startswith(BASE):
+            r.route = "python+curl+browser"
         return r
 
 
@@ -656,14 +692,23 @@ def _route_note(text: str) -> None:
 
 
 _AUTO: AutoTransport | None = None
+_BROWSER_ROUTE: Transport | None = None
 
 
 def default_transport() -> Transport:
     """The app's one transport (it remembers which way gets through)."""
     global _AUTO
     if _AUTO is None:
-        _AUTO = AutoTransport()
+        _AUTO = AutoTransport(browser=_BROWSER_ROUTE)
     return _AUTO
+
+
+def set_browser_route(route: Transport | None) -> None:
+    """The window side (astria_door.py) hands over the browser way once Qt is running; this module stays Qt-free."""
+    global _BROWSER_ROUTE
+    _BROWSER_ROUTE = route
+    if _AUTO is not None:
+        _AUTO.browser = route
 
 
 def _multipart(fields: dict[str, str], files: list[tuple[str, str, str, bytes]]) -> tuple[bytes, str]:
@@ -685,6 +730,10 @@ def _advice(ref: Refusal, tried: int = 1) -> str:
     again = f" Tried {tried} times, waiting in between." if tried > 1 else ""
     log = " Details: " + str(LOGS / "astria-requests.log").replace(str(Path.home()), "~") + "."
     if ref.kind == "challenge":
+        if ref.route == "python+curl+browser":
+            return (ref.message + again + " Cloudflare is checking this network's address, and the check in the "
+                    "“Astria — Cloudflare's check” window wasn't completed. Open Astria Settings ▸ Check Connection "
+                    "and answer the check in the window that opens — or use another network (a phone hotspot)." + log)
         if ref.route == "python+curl":
             return (ref.message + again + " It came back the same through the Mac's own networking, so it's this "
                     "network or address Cloudflare is checking, not the app or the API key: turn off a VPN if one "
@@ -897,8 +946,11 @@ class Gate:
             return max(0.0, self.cool_until - now)
 
     def passed(self) -> None:
+        """A call got through: the strikes are forgotten, and so is any pause still running (a request that
+        reached Astria — by the browser window, say — means there's nothing left to wait out)."""
         with self.lock:
             self.strikes = 0
+            self.cool_until = 0.0
 
 
 GATE = Gate()
@@ -935,9 +987,44 @@ def check_connection(key: str | None = None) -> list[str]:
             ref = explain(r)
             lines.append(f"Through {name}: {ref.message}")
             kinds.append(ref.kind)
-    lines.append(f"The app is sending through: {'the Mac’s curl' if getattr(auto, 'use', 'python') == 'curl' else 'Python’s networking'}"
+    door = getattr(auto, "browser", None)
+    by_door = ""
+    if door is not None and kinds and all(k == "challenge" for k in kinds):
+        # Both direct ways are checked: the browser window, where the person answers the check themselves.
+        lines.append("Both direct ways are being checked — opening the “Astria — Cloudflare's check” window: answer "
+                     "the check there (it closes by itself).")
+        try:
+            if hasattr(door, "insist"):
+                door.insist()                                # asked for outright: an earlier "Not Now" doesn't hold
+            r = door.send("GET", BASE + "/tunes?limit=1", heads, None, 30)
+            if 200 <= r.status < 300:
+                by_door = "ok"
+                lines.append(f"Through the browser window: Astria answered (HTTP {r.status}) — this way works.")
+            else:
+                ref = explain(r)
+                by_door = ref.kind
+                lines.append(f"Through the browser window: {ref.message}")
+        except (Transport.PreSend, Transport.Ambiguous) as e:
+            by_door = "none"
+            lines.append(f"Through the browser window: no answer ({e})")
+    using = getattr(auto, "use", "python")
+    if by_door in ("ok", "api") and isinstance(auto, AutoTransport):
+        auto._prefer("browser")
+        GATE.passed()
+        using = "browser"
+    lines.append("The app is sending through: " + {"curl": "the Mac’s curl", "browser": "the browser window"}.get(using, "Python’s networking")
                  + (f" · paused another {round(GATE.cooling())} s" if GATE.cooling() > 0 else ""))
-    if "ok" in kinds:
+    if by_door == "ok":
+        lines.append("→ Cloudflare is checking this network's address, and you've answered its check: the app now "
+                     "sends through the browser window (it will ask again when the check runs out). Try Generate again.")
+    elif by_door == "api":
+        lines.append("→ The check is answered and Astria is reachable through the browser window, but it refused the "
+                     "request itself — see its words above (usually the key).")
+    elif by_door in ("challenge", "none"):
+        lines.append("→ Cloudflare is checking this network's address and the check in the window wasn't completed. "
+                     "Press Check Connection again and answer it, or try another network (a phone hotspot). If it "
+                     "can't be passed there either, send Astria these lines.")
+    elif "ok" in kinds:
         if kinds[0] != "ok" and isinstance(auto, AutoTransport):
             auto._prefer("curl")
             lines.append("→ Python's networking is being turned away but the Mac's own gets through: the app uses "
@@ -1097,6 +1184,8 @@ class Client:
                 return pid
             ref = self.last_refusal or explain(r, len(body))
             if ref.wait:
+                if ref.route.endswith("+browser"):           # the person was asked and didn't answer the check:
+                    raise AIError("server", _advice(ref))    # waiting and asking again would only ask them again
                 if attempt < 4:
                     continue                                 # the gate holds the next try until the pause is over
                 raise AIError("server", _advice(ref, tried=4))

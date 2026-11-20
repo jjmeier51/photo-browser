@@ -1597,8 +1597,12 @@ model and the models' tune ids).
   networking and the Mac's built-in `curl` — and says in plain lines what each got and what that means; **Copy**
   puts the lines on the clipboard. The app also does this by itself: if Astria's front door (Cloudflare) answers
   one way with its "Just a moment…" browser check, the same request goes the other way at once, and whichever
-  gets through is used from then on. If both are checked, it's the network (a VPN, or the address) and the
-  message says so.
+  gets through is used from then on. **If both are checked, Cloudflare is checking your network's address** —
+  a check only a person can answer. A small window, **Astria — Cloudflare's check**, then opens with the check
+  in it: answer it as you would in Safari, the window closes by itself, and from then on the app's Astria
+  requests go through that window's browser (it asks again whenever the check runs out; **Not Now** leaves it
+  for a couple of minutes). Check Connection opens it too. If the check can't be passed there either, it's down
+  to another network (a phone hotspot) or Astria's support — send them the lines Check Connection shows.
 - **When Astria says wait.** If Astria's front door (Cloudflare) checks or rate-limits a request, the whole app
   pauses its Astria requests for as long as asked, the job's status says "Astria asked this Mac to wait —
   sending in 30 s", and it's sent again by itself (up to four times). If it still fails, the message says what
