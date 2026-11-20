@@ -524,6 +524,9 @@ def install(win, sf) -> None:
     act(dl, "Download from Depop…", lambda: sf.open_depop(folder_target(), win), None, folder_target,
         "A Depop shop's photos: pick the ones you want and they come down at their largest — upscaled 2× too, if "
         "you like")
+    act(dl, "Download from Google Drive…", lambda: sf.open_gdrive(folder_target(), win), None, folder_target,
+        "Files and whole folders from your Google Drive — or from pasted links — into this folder, exactly as "
+        "they are in Drive and with their dates")
     passes_act = act(dl, sf.passes_label(folder_target()) if folder_target() else "Download Passes…",
                      lambda: sf.open_passes(folder_target(), win), None, folder_target)
     dl.aboutToShow.connect(lambda: passes_act.setText(          # (named for the folder it would act on *now*)

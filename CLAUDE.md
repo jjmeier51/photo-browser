@@ -496,6 +496,17 @@ written through `simpcity.ExifPool`, saves every 60 s — §7.4b-3. (`SimpCitySe
   (falls back to the phone's `metadata.json` backup), right-click a folder ▸ Set Birthday…, viewer Info ▸ Age,
   Go ▸ Folder Birthdays…; renames carry them. **Any new birthday setter on the iPhone must stamp
   `birthdayStamps`.** §6ap.
+- **Google Drive in Photo Browser for Mac** — right-click a folder ▸ Download ▸ Download from Google Drive…
+  (`mac/gdrive.py`, `mac/gdrive_window.py`): files and whole folders ticked in a tree of the person's Drive (My
+  Drive / Shared with me / Starred / Shared drives / search) or pasted as links, into that folder with the tree
+  rebuilt. **Not the iPhone's embedded-browser way**: Google's own OAuth sign-in in the Mac's browser (loopback +
+  PKCE, `drive.readonly`) and the Drive API, with **the person's own Google Cloud client** (Set Up…; secret and
+  token in the Keychain) — never sign in to Google in a Qt browser or dress a request as another browser's. An API
+  key alone covers "anyone with the link" items; with nothing set up one public file still comes
+  (`public_item`). **Bytes are Drive's** (`alt=media`, checked against Drive's size + MD5, never re-encoded — so
+  EXIF is untouched), dates are Drive's (`put_dates`: modified = `modifiedTime`, created = the earlier of that and
+  `createdTime`; folders dated last); never overwrites, skips what's here (`here_as`); Google's own documents are
+  counted and left. Not run against Google. §7.4i.
 - **Depop shops in Photo Browser for Mac** (Mac only) — right-click a folder ▸ Download ▸ Download from Depop…
   (`mac/depop_downloader.py`, `mac/depop.py`): the shop's page in a browser, every listing photo as a tile to select
   (double-click = the listing), **Download** takes each at its largest — `depop.fetch_best` fetches `P0` and

@@ -305,13 +305,14 @@ def fetch_to_file(url: str, headers: dict[str, str], path: str, *, connect_timeo
                   resume: bool = True, stop: Callable[[], bool] | None = None, min_bytes: int = 64,
                   context: ssl.SSLContext | None = None,
                   progress: Callable[[int, int | None], None] | None = None,
-                  stall: float = 60) -> tuple[str | None, str]:
+                  stall: float = 60, any_kind: bool = False) -> tuple[str | None, str]:
     """`url` into `path` (module notes). Returns (path, "") or (None, why) — why is "HTTP 404", "the server sent a
     page…", "couldn't connect (…)", "cut off after …", "stalled (…)", "still downloading after …", "stopped".
     `connect_timeout` bounds the wait for an answer and each read (so Stop, too, waits at most that long on a
     server that has gone silent). `limit` is how long the call may take before the transfer has to show it's
     worth going on with: past it, one of unknown size ends, and one of known size ends the first time it's found
-    under `SLOW` bytes a second over `stall` seconds. Under `TRICKLE` for `stall` seconds at any time is a stall —
+    under `SLOW` bytes a second over `stall` seconds. `any_kind`: the file may be text or a web page itself (a
+    person's own files from Google Drive) — the "that's a page, not a photo" checks are for media and are skipped. Under `TRICKLE` for `stall` seconds at any time is a stall —
     that try fails and is retried. `check(size, type)` sees the answer before any of it is read and may raise
     (the exception is passed on — a video already downloaded is skipped that way). `busy`: also retry 429 and 5xx
     (callers with their own, tuned waits for a busy server pass False).
@@ -352,7 +353,7 @@ def fetch_to_file(url: str, headers: dict[str, str], path: str, *, connect_timeo
             with opener(context).open(req, timeout=connect_timeout) as resp:
                 status = getattr(resp, "status", 200)
                 ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
-                if ctype.startswith("text/"):           # (a piece from before stays: this answer says nothing of it)
+                if ctype.startswith("text/") and not any_kind:   # (a piece from before stays: this answer says nothing of it)
                     _remove(path)
                     return None, f"the server sent a page ({ctype}), not the file"
                 unpack = _unpacker(_coding(resp.headers))
@@ -426,7 +427,7 @@ def fetch_to_file(url: str, headers: dict[str, str], path: str, *, connect_timeo
                 _forget(part, note)
                 _remove(path)
                 return None, "an empty file"
-            if looks_like_page(part):
+            if not any_kind and looks_like_page(part):
                 _forget(part, note)
                 _remove(path)
                 return None, "the server sent a page, not the file"

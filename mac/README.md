@@ -297,7 +297,7 @@ Everything Photo Browser for Mac does is in its menus, acting on the pane you're
   Duplicates…, **Edit Photo… ⌘E**, **Paste Edits…**, **Make Collage…**, then
   the tools in groups: **Adjust ▸** (Crop, Rotate, Convert WebP to JPEG), **Retouch ▸** (AI Upscale 2×, Erase
   Area, Remove Watermark, Remove Objects), **Video ▸** (**Stitch Videos**, Export All Frames, Upscale Video), **CapCut ▸**, **AI ▸** (Edit / Create with AI, Astria.ai Browser, Make AI Model, AI Models),
-  **Download ▸** (SimpCity, Instagram, Facebook, TikTok, Fanfix, Depop, taylorpictures.net).
+  **Download ▸** (SimpCity, Instagram, Facebook, TikTok, Fanfix, Depop, Google Drive, taylorpictures.net).
 - **Window** — Minimize, Zoom, Bring All to Front, and every viewer and tool window that's open.
 - **Help** — the guide and the keyboard shortcuts in a window with a search field, Find a Command…, Welcome…,
   About.
@@ -1338,6 +1338,51 @@ turns red, and the item's tile gets a small red bin next to its heart. In the ma
 the right-click menu and in the Photos menu (⇧⌘X too), for everything selected; Undo (⌘Z) takes it back. Nothing is
 deleted — it's a tag, so you can go through them later (sidebar ▸ Tags ▸ to-delete) and delete them then. The
 iPhone app sees the tag too.
+
+### Download from Google Drive — files and whole folders, with their dates (`gdrive_window.py`, `gdrive.py`)
+
+Right-click a folder ▸ **Download ▸ Download from Google Drive…** (or the Download menu in the menu bar). What you
+pick comes down into that folder.
+
+- **Browse your Drive**: My Drive, Shared with me, Starred, Shared drives, or a search by name. Tick files — or tick
+  a folder to take **everything inside it**, with its subfolders rebuilt on the drive. Click a folder's arrow to look
+  inside first.
+- **Or paste links** — one or several, files or folders — and press Add Links. They're added to the list, ticked.
+- **Download** runs four files at a time, with a progress bar, Stop, and a line for anything that didn't come.
+
+**What you get is the file exactly as it is in Drive** — the same bytes, nothing re-encoded, so the EXIF (capture
+date, camera, GPS), colour profile and everything else inside a photo or video is untouched. Each file is checked
+against Drive's own size and checksum before it's put on the drive. The file's **modified date is Drive's modified
+date** (the file's own date from when it was uploaded) and its **created date** the earlier of that and Drive's
+created date; folders get their Drive dates too. Nothing is overwritten: a file already there is skipped, and a
+different file of the same name is kept beside it as "name 2.jpg". Run it again later and only what's new comes.
+
+Google's own documents (Docs, Sheets, Slides) aren't files — they're counted and left; export them from Drive if you
+want them.
+
+**Signing in — a one-time setup.** Google lets a desktop app read a Drive only through its official sign-in, and
+that needs a small free "project" of your own (about five minutes; the window's **Set Up…** button shows the same
+steps and opens the page):
+
+1. Open [console.cloud.google.com](https://console.cloud.google.com) and create a project (any name).
+2. APIs & Services ▸ Library ▸ search "Google Drive API" ▸ **Enable**.
+3. APIs & Services ▸ OAuth consent screen (also shown as "Google Auth Platform"): choose **External**, give it a
+   name and your email, and under Audience ▸ **Test users** add your own Google address.
+4. APIs & Services ▸ Credentials (or Google Auth Platform ▸ Clients) ▸ Create ▸ **OAuth client ID** ▸ Application
+   type **Desktop app**. Copy the **Client ID** and **Client secret** into Set Up….
+5. Optional: Create Credentials ▸ **API key** and paste it too — then links shared "anyone with the link" work
+   without signing in.
+
+Then **Sign In with Google…**: your own browser (Safari, Chrome) opens Google's page, you approve, and the window
+carries on. The access asked for is **read-only** — the app can't change or delete anything in your Drive. The
+secret and the sign-in are kept in the Mac's Keychain. While the project is left in "Testing", Google ends the
+sign-in after 7 days and the window asks you to sign in again; publishing the project (same page) removes that.
+
+**Without any setup**, a single *file* shared "anyone with the link" can still be pasted and downloaded (not a
+folder, and Drive gives less about its dates that way).
+
+This is different from the iPhone app, which shows Drive in a browser inside the app. On the Mac, Google's own
+sign-in in your own browser is the supported way, so that's what's used.
 
 ### Download photos from a Depop shop (`depop_downloader.py`, `depop.py`)
 

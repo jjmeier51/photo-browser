@@ -943,6 +943,29 @@ def open_depop(folder: str, parent: QWidget | None = None) -> None:
     win.show()
 
 
+_GDRIVE_WINDOWS: list = []
+
+
+def open_gdrive(folder: str, parent: QWidget | None = None) -> None:
+    """Right-click a folder ▸ Download ▸ "Download from Google Drive…": files and whole folders picked in the
+    person's Drive (or pasted as links), downloaded into `folder` byte for byte with Drive's dates on them
+    (gdrive_window.py; gdrive.py). The sign-in is Google's own, in the Mac's browser."""
+    import gdrive_window
+    win = gdrive_window.DriveWindow(folder)
+    win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+    def arrived(dest: str, files: list) -> None:
+        pane = getattr(parent, "active_pane", None)
+        if files and pane is not None:
+            n = len(files)
+            pane.note(f"{n} file{'s' if n != 1 else ''} from Google Drive in “{os.path.basename(dest.rstrip(os.sep))}”.",
+                      "Show", lambda: pane.go(dest))
+    win.finished.connect(arrived)
+    win.destroyed.connect(lambda _=None, w=win: _GDRIVE_WINDOWS.remove(w) if w in _GDRIVE_WINDOWS else None)
+    _GDRIVE_WINDOWS.append(win)
+    win.show()
+
+
 def heart_path(r: QRectF) -> QPainterPath:
     """A heart filling `r`."""
     x, y, w, h = r.x(), r.y(), r.width(), r.height()
@@ -7236,6 +7259,7 @@ class Pane(QWidget):
         dl.addAction(tiktok_label(folder), lambda: open_tiktok(folder, self.window()))
         dl.addAction(fanfix_label(folder), lambda: open_fanfix(folder, self.window()))
         dl.addAction(depop_label(folder), lambda: open_depop(folder, self.window()))
+        dl.addAction("Download from Google Drive…", lambda: open_gdrive(folder, self.window()))
         dl.addSeparator()
         dl.addAction("Browse taylorpictures.net…", lambda: self.open_taylor(folder))
         ai = menu.addMenu("AI")

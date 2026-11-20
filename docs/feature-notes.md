@@ -4153,6 +4153,56 @@ Nothing is deleted by it — it marks things to go through later (sidebar ▸ Ta
 - **Tiles**: a red disc with a white bin beside the heart (`marks_of`, `draw_labels`).
 - `TO_DELETE_TAG = "to-delete"` in both `photo_browser.py` and `media_viewer.py` (the viewer is imported lazily).
 
+### 7.4i Google Drive in Photo Browser for Mac — `mac/gdrive.py`, `mac/gdrive_window.py` (Nov 20, 2026)
+
+**Asked for:** "similar to the iOS app, add a Google Drive downloader… one or more files or complete folders… It
+should retain all exif data and dates." Right-click a folder ▸ Download ▸ Download from Google Drive… (menu bar:
+Download ▸).
+
+**Not the iPhone's way, on purpose.** The iPhone (`GoogleDriveBrowserView`) shows drive.google.com in a `WKWebView`
+with Safari's User-Agent and downloads with that session's cookies. The Mac does **not** sign in to Google in an
+embedded browser or present itself as another browser: Google refuses sign-in in embedded views, and getting past
+that would mean disguising the client. Instead it's Google's documented route for desktop apps — **OAuth 2.0 in the
+Mac's own browser** (loopback `http://127.0.0.1:<port>` + PKCE S256, `Auth.sign_in`), scope **`drive.readonly`**,
+then the **Drive API v3**. The cost is a one-time setup: the person makes their own Google Cloud OAuth client
+("Desktop app") and pastes its ID and secret (`SETUP_STEPS`, shown by Set Up…). No client is shipped in the repo —
+a shared one would need Google's verification for a restricted scope. Don't "simplify" this back to cookies.
+
+- **Three levels** (`gdrive.py` header): signed in (everything the account sees); an **API key** only (items shared
+  "anyone with the link", folders included); **nothing** (one public *file* by Drive's public download address —
+  `public_item` / `public_download`, the confirm page followed once; no folder listing, date only if the answer has
+  `Last-Modified`).
+- **Secrets**: client secret and refresh token in the Keychain (`app_identity.keychain_services("Google Drive")`,
+  accounts `client-secret` / `refresh-token`); a 0600 file off the Mac. Settings (`gdrive.json` in
+  `app_identity.support()`) hold only the client id, API key and the account's address. Sign Out revokes the token.
+- **A project left in "Testing" loses its refresh token after 7 days** — `invalid_grant` becomes `NeedsSignIn`
+  with those words; the window shows signed out and says why.
+- **Planning** (`Client.plan`): folders walked to the bottom (`files.list`, 1000 a page, `supportsAllDrives`),
+  the tree rebuilt under the destination; Google's own documents counted and left (`Item.is_doc` — no bytes to
+  fetch, and exporting would be a conversion, not the file); a shortcut followed to its target (`_through`), a
+  shortcut loop walked once (`seen`); names through `net_fetch.safe_name`; two Drive files of one name in one
+  folder both come ("name", "name 2"). **Already here** = same size and (same date, or same MD5) — and the
+  numbered names an earlier run gave are checked too (`here_as`, each file on the drive answering for one Drive
+  file), so a second run of a folder with same-named files downloads nothing.
+- **Downloading** (`Client.download`): `files/{id}?alt=media` — **Drive's bytes, never re-encoded, so EXIF / GPS /
+  profiles are whatever was uploaded** — through `net_fetch.fetch_to_file(…, any_kind=True)` (new flag: a Drive
+  holds text and HTML files too, so the "this is a web page" refusal is off; what arrived is checked against
+  Drive's **size and MD5** instead), then `net_fetch.put` (whole or absent, never over something). 403 rate limits
+  are retried with backoff; other refusals are put in words (`explain`, `REASONS`: flagged as abuse, download
+  quota, not shared…). Four at a time (`LANES`).
+- **Dates** (`put_dates` → `clone_drive.set_dates`, one `setattrlist`): modified = Drive's `modifiedTime` (the
+  file's own mtime as uploaded), created = min(`createdTime`, `modifiedTime`) — a 2019 photo uploaded in 2023 isn't
+  born in 2023. Folders are dated last (`date_folders`), deepest first, after their contents are in.
+- **Window** (`gdrive_window.py`): a lazily read, tickable tree (a ticked folder stands for everything in it —
+  `picked()` doesn't descend into one); links added on top and kept across place changes; listing, sign-in and the
+  run on worker threads, handed back through `_Bridge`; an answer for an older listing is dropped (`serial`);
+  `running` set during a run (Quit asks); result as a toast in the main window with Show. No tag is added.
+- **Tests** (scratchpad, against a stand-in Google — OAuth, Drive API, public address): the engine (sign-in round
+  trip with PKCE, paging, places, whole-folder plan, bytes + EXIF identical, dates, skip / "name 2", checksum
+  mismatch refused, rate-limit retry, token refresh, expired sign-in, key-only, no-setup public file with confirm
+  page, revoke) and the window offscreen. **Never run against Google** — the consent page, real quotas and the
+  console's current wording are unverified.
+
 ### 7.4g Depop shops in Photo Browser for Mac — `mac/depop.py`, `mac/depop_downloader.py` (Nov 16, 2026)
 
 "Add the ability to download photos from Depop stores. The user should be able to select one or more photos, and
