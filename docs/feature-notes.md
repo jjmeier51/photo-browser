@@ -609,6 +609,33 @@ the TikTok downloader). If it doesn't, what's left is outside the app: another n
 the Ray numbers. Likely cause of the address being checked at all: Cloudflare scores an address across every site
 it fronts, and this one has done a great deal of automated downloading.
 
+#### 1.13-f The pictures were made but never came (Mac, Nov 20, 2026)
+
+First real use of the browser window (§1.13-e): the check was answered, the prompt reached Astria, the pictures were
+generated — and the job ended with "Couldn't reach Astria…". **Astria's result pictures are on another host,
+`mp.astria.ai`** (seen in its public gallery data), behind the same Cloudflare zone; the window's route took only
+`api.astria.ai` addresses, so every picture was still fetched the direct ways, checked, and dropped — silently
+(`Client.download` returned None for any non-2xx without a word, and the job's error was the generic "network").
+
+- **Files on other hosts go through the window too** (`astria_door.Door._file`): a GET that isn't the API is a
+  *file* — fetched by the browser's own download (`QWebEnginePage.download` → the profile's `downloadRequested`,
+  only the download this door asked for is accepted, into a private temp folder), which carries the clearance and
+  needs no cross-origin permission. If the host turns the download away or sends a page, the picture's address is
+  opened in the window once: if it's that host's own check the person answers it (`_file_watch` sees the picture
+  itself showing) and the download is made again; if it's some other page (a missing picture) it's handed back as
+  a plain refusal. The window returns to the API's address on the next request (`_on_origin` → `_load`).
+- **`AutoTransport` decides per host** (`hosts`): a picture host is tried the direct ways first (they're faster and
+  run in parallel); when both are checked it goes to the window, and from then on that host goes straight there for
+  the rest of the run.
+- **A failed picture says why**: `Client.download_problem`, a line in `astria-requests.log` ("picture on
+  mp.astria.ai" — never the picture's address, which is a private link), and the job's message is now "Astria made
+  N pictures but they couldn't be downloaded — <why>. They're kept on Astria: … next time, and in the Astria.ai
+  Browser" (`AIError.describe` for a "network" error that carries a message). Still recoverable: the pending job
+  is picked up next time.
+
+Tests: `astria_door_t/t.py` §7–10 (a host the browser is let straight into; a host with its own check; a missing
+picture; the person declining). As before, not tried against Cloudflare itself.
+
 ## 2. Find Duplicates — `DuplicatesView.swift`, `PerceptualHash.swift`
 
 Non-recursive scan of one folder. Three **independent** match kinds (never chained across each

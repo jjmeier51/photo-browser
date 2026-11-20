@@ -18,13 +18,22 @@ for `DECLINED_FOR` unless asked — Check Connection `insist`s); then send. The 
 base64 in ~512 KB scripts), the answer comes back as status + headers + base64. Scripts run in Qt's
 *application world*, so the key is never a variable the page's own scripts can read.
 
-Only `astria.BASE` addresses go this way (same origin); result pictures are fetched as before. A request that
-fails after it was sent is `Ambiguous`, as on the other ways (the caller looks before sending again).
+**The result pictures** are on another of Astria's hosts (`mp.astria.ai`) behind the same front door — which is why,
+the first day of this window, a generation went through and its pictures "couldn't be reached": they were still
+being fetched the direct ways. A GET for any other host comes here as a *file* (`_Call.kind == "file"`): the
+browser's own download (`QWebEnginePage.download` → the profile's `downloadRequested`), which carries the clearance
+and needs no cross-origin permission. If that host wants its own check, the picture's address is opened in the
+window, the person answers, and the download is made again.
+
+A request that fails after it was sent is `Ambiguous`, as on the other ways (the caller looks before sending again).
 """
 from __future__ import annotations
 
 import base64
 import json
+import os
+import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -70,6 +79,9 @@ SEND = r"""(function(){ window.__pb = window.__pb || {}; var id = __ID__; window
     .catch(function(e){ window.__pb[id] = JSON.stringify({status: 0, error: String(e)}); });
   return true; })()"""
 TAKE = r"""(function(){ var v = (window.__pb || {})[__ID__]; if (v) delete window.__pb[__ID__]; return v || ''; })()"""
+# what the window is showing, while a picture's host is being checked: a picture (passed), or a page (which?)
+SHOWING = r"""(function(){ return JSON.stringify({type: document.contentType || '', title: document.title || '',
+  head: (document.body && document.body.innerText || '').slice(0, 300)}); })()"""
 
 CHECKED = (403, b"<html><title>Just a moment...</title></html>", {"cf-mitigated": "challenge"})
 
@@ -78,6 +90,7 @@ class _Call:
     def __init__(self, method: str, url: str, headers: dict, body: bytes | None, timeout: float) -> None:
         self.id = uuid.uuid4().hex
         self.method, self.url, self.headers, self.body, self.timeout = method, url, headers, body, timeout
+        self.kind = "api" if url.startswith(A.BASE) else "file"
         self.event = threading.Event()
         self.response: A.Response | None = None
         self.error: Exception | None = None
@@ -109,6 +122,9 @@ class Door(QObject):
         from PySide6.QtWebEngineWidgets import QWebEngineView
         profile = QWebEngineProfile("astria", QApplication.instance())       # kept: the clearance lasts between launches
         profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+        profile.downloadRequested.connect(self._download_asked)
+        self.tmp = tempfile.mkdtemp(prefix="pb-astria-door-")
+        QApplication.instance().aboutToQuit.connect(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
         self.window = QWidget()
         self.window.setWindowTitle("Astria — Cloudflare's check")
         self.window.resize(560, 640)
@@ -166,6 +182,9 @@ class Door(QObject):
         call.began = time.monotonic()                        # type: ignore[attr-defined]
         call.shown = False                                   # type: ignore[attr-defined]
         call.loads = 0                                       # type: ignore[attr-defined]
+        if call.kind == "file":
+            self._file(call)
+            return
         if self._on_origin():
             self._probe(call)
         else:
@@ -257,11 +276,124 @@ class Door(QObject):
     def _give_up(self) -> None:
         """Not Now / the window closed: whoever is waiting on the check gets the check's own answer."""
         call = self.busy
-        if call is not None and getattr(call, "shown", False) and not call.sent:
+        if call is not None and getattr(call, "shown", False) and (not call.sent or call.kind == "file"):
             self.declined_until = time.monotonic() + DECLINED_FOR
             self._finish(call, response=self._checked())
         if self.window is not None:
             self.window.hide()
+
+    # -- a file on another host (a result picture): the browser's own download
+    def _file(self, call: _Call) -> None:
+        if self.busy is not call:
+            return
+        call.sent = True
+        call.tries = getattr(call, "tries", 0) + 1          # type: ignore[attr-defined]
+        call.request = None                                  # type: ignore[attr-defined]
+        tries = call.tries                                   # type: ignore[attr-defined]
+        self.view.page().download(QUrl(call.url), f"{call.id}-{tries}")
+
+        def late() -> None:                                  # nothing came of it in time
+            if self.busy is call and call.tries == tries and not call.event.is_set():   # type: ignore[attr-defined]
+                req = call.request                           # type: ignore[attr-defined]
+                if req is not None:
+                    try:
+                        req.cancel()
+                    except RuntimeError:
+                        pass
+                self._finish(call, error=A.Transport.Ambiguous("the browser's download took too long"))
+        QTimer.singleShot(int((call.timeout + 10) * 1000), late)
+
+    def _download_asked(self, req) -> None:
+        """The profile's downloads: only the one this door asked for is taken (anything else the page starts isn't)."""
+        call = self.busy
+        if call is None or call.kind != "file" or getattr(call, "request", None) is not None \
+                or req.url().toString() != QUrl(call.url).toString():
+            req.cancel()
+            return
+        call.request = req                                   # type: ignore[attr-defined]
+        req.setDownloadDirectory(self.tmp)
+        req.setDownloadFileName(f"{call.id}-{call.tries}.bin")          # type: ignore[attr-defined]
+        req.stateChanged.connect(lambda _state, c=call, r=req: self._file_state(c, r))
+        req.accept()
+
+    def _file_state(self, call: _Call, req) -> None:
+        from PySide6.QtWebEngineCore import QWebEngineDownloadRequest as Q
+        if self.busy is not call or getattr(call, "request", None) is not req:
+            return
+        state = req.state()
+        if state not in (Q.DownloadState.DownloadCompleted, Q.DownloadState.DownloadInterrupted,
+                         Q.DownloadState.DownloadCancelled):
+            return
+        path = os.path.join(req.downloadDirectory(), req.downloadFileName())
+        data = b""
+        if state == Q.DownloadState.DownloadCompleted:
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+            except OSError:
+                data = b""
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        call.request = None                                  # type: ignore[attr-defined]
+        page = data[:400].lstrip().lower().startswith((b"<!doctype", b"<html"))
+        if data and not page:
+            if getattr(call, "shown", False) and self.window is not None:
+                self.window.hide()
+            self._finish(call, response=A.Response(200, data, {"content-type": req.mimeType() or ""}, "browser"))
+            return
+        # A page where the file belongs, or the server turned the download away: this host's own check, perhaps —
+        # shown to the person once; whatever it turns out to be is then said as what it is.
+        if getattr(call, "checked", False):
+            body = data[:2000] if data else b""
+            self._finish(call, response=(self._checked() if not data or A.explain(A.Response(403, body, {})).kind == "challenge"
+                                         else A.Response(403, body, {}, "browser")))
+            return
+        call.checked = True                                  # type: ignore[attr-defined]
+        if time.monotonic() < self.declined_until:
+            self._finish(call, response=self._checked())
+            return
+        call.shown = True                                    # type: ignore[attr-defined]
+        call.began = time.monotonic()                        # type: ignore[attr-defined]
+        self._say("Astria's pictures come from another of its addresses, and the front door (Cloudflare) wants to "
+                  "check that a person is here for that one too. Answer the check below — this window closes by "
+                  "itself, and the pictures come.")
+        self.window.show()
+        self.window.raise_()
+        self.window.activateWindow()
+        self.view.page().load(QUrl(call.url))
+        QTimer.singleShot(PROBE_EVERY_MS, lambda: self._file_watch(call, 0))
+
+    def _file_watch(self, call: _Call, plain: int) -> None:
+        """While the picture's address is open in the window: has the check been passed (the picture shows)?"""
+        if self.busy is not call:
+            return
+        if time.monotonic() - call.began > CHECK_WAIT:       # type: ignore[attr-defined]
+            self.declined_until = time.monotonic() + DECLINED_FOR
+            self.window.hide()
+            self._finish(call, response=self._checked())
+            return
+
+        def got(raw) -> None:
+            if self.busy is not call:
+                return
+            try:
+                showing = json.loads(raw) if isinstance(raw, str) and raw else {}
+            except ValueError:
+                showing = {}
+            kind = str(showing.get("type") or "")
+            if kind and not kind.startswith(("text/html", "application/xhtml")):
+                self._file(call)                             # the picture itself shows: through — fetch it now
+                return
+            text = f"<html><title>{showing.get('title', '')}</title>{showing.get('head', '')}</html>".encode("utf-8", "replace")
+            is_check = A.explain(A.Response(403, text, {})).kind == "challenge" or not kind
+            if not is_check and plain >= 3:                  # a page, but not the check: the host's own refusal
+                self.window.hide()
+                self._finish(call, response=A.Response(403, text, {}, "browser"))
+                return
+            QTimer.singleShot(PROBE_EVERY_MS, lambda: self._file_watch(call, 0 if is_check else plain + 1))
+        self.view.page().runJavaScript(SHOWING, 0, got)
 
     # -- sending
     def _send(self, call: _Call) -> None:
@@ -342,8 +474,8 @@ class BrowserTransport(A.Transport):
             raise A.Transport.PreSend("no browser window in this run")
         if QThread.currentThread() is app.thread():
             raise A.Transport.PreSend("asked from the window's own thread")
-        if not url.startswith(A.BASE):
-            raise A.Transport.PreSend("not Astria's address")
+        if not url.startswith(A.BASE) and (method != "GET" or not url.startswith(("https://", "http://"))):
+            raise A.Transport.PreSend("only a file can be fetched from another address")
         call = _Call(method, url, headers, body, timeout)
         door.ask.emit(call)
         if not call.event.wait(timeout + CHECK_WAIT + 60):

@@ -147,6 +147,9 @@ class AIError(Exception):
         return self.kind in ("network", "timed_out")
 
     def describe(self) -> str:
+        if self.kind == "network" and self.message:          # what exactly went wrong, then what happens next
+            return (self.message + " They're kept on Astria: Photo Browser for Mac will fetch them next time its AI is "
+                    "used, and they're in the Astria.ai Browser.")
         return {"not_configured": "Astria isn't set up yet — add your API key.",
                 "bad_image": "The photo couldn't be read.",
                 "network": "Couldn't reach Astria. If a generation was started it may still finish — Photo Browser for Mac "
@@ -605,6 +608,9 @@ class AutoTransport(Transport):
         self.remember = remember
         self.lock = threading.Lock()
         self.use = "python"
+        # Other hosts (the result pictures are on mp.astria.ai — the same front door, its own check): which of
+        # them go by the browser window, for this run. Found out per host, the first time a picture is checked.
+        self.hosts: dict[str, str] = {}
         if remember:
             kept = store().get("route", {}) or {}
             fresh = time.time() - float(kept.get("at", 0)) < ROUTE_DAYS * 86400
@@ -615,8 +621,9 @@ class AutoTransport(Transport):
 
     def _by_browser(self, method: str, url: str, headers: dict, body: bytes | None, timeout: float) -> Response | None:
         """The request through the browser window → its answer, or None when that way isn't there (no window
-        system, another host) or the person didn't answer the check — the caller goes on without it."""
-        if self.browser is None or not url.startswith(BASE):
+        system) — the caller goes on without it. Astria's API by `fetch` from the window's page; a file on another
+        host (a result picture) by the browser's own download, GET only."""
+        if self.browser is None or (not url.startswith(BASE) and method != "GET"):
             return None
         try:
             r = self.browser.send(method, url, headers, body, timeout)
@@ -635,8 +642,10 @@ class AutoTransport(Transport):
             store().set("route", {"use": use, "at": time.time()})
 
     def send(self, method: str, url: str, headers: dict, body: bytes | None, timeout: float) -> Response:
+        api = url.startswith(BASE)
+        host = "" if api else _host(url)
         asked_browser = False
-        if self.use == "browser":
+        if (self.use == "browser") if api else (self.hosts.get(host) == "browser"):
             asked_browser = True
             r = self._by_browser(method, url, headers, body, timeout)
             if r is not None and (200 <= r.status < 300 or explain(r).kind != "challenge"):
@@ -671,15 +680,26 @@ class AutoTransport(Transport):
         if not asked_browser:                                # both checked: it's the address — the person's turn
             r3 = self._by_browser(method, url, headers, body, timeout)
             if r3 is not None and (200 <= r3.status < 300 or explain(r3).kind != "challenge"):
-                _route_note(f"{method} {url.replace(BASE, '')}: python and curl were met with the browser check; "
-                            f"the browser window got HTTP {r3.status}")
-                self._prefer("browser")
+                _route_note(f"{method} {url.replace(BASE, '') if api else host}: python and curl were met with the "
+                            f"browser check; the browser window got HTTP {r3.status}")
+                if api:
+                    self._prefer("browser")
+                else:
+                    self.hosts[host] = "browser"
                 return r3
             if r3 is not None:
                 r.route = "python+curl+browser"
-        elif self.browser is not None and url.startswith(BASE):
+        elif self.browser is not None:
             r.route = "python+curl+browser"
         return r
+
+
+def _host(url: str) -> str:
+    from urllib.parse import urlsplit
+    try:
+        return urlsplit(url).netloc.lower()
+    except ValueError:
+        return ""
 
 
 def _route_note(text: str) -> None:
@@ -1087,6 +1107,7 @@ class Client:
             gate = Gate(slept, lambda: t[0])
         self.gate = gate or GATE
         self.last_refusal: Refusal | None = None
+        self.download_problem = ""                           # why the last picture couldn't be fetched (for the message)
 
     def _send(self, method: str, url: str, headers: dict, body: bytes | None, timeout: float,
               patient: bool = False) -> Response | None:
@@ -1268,14 +1289,25 @@ class Client:
                 self.sleep(1.5 * 2 ** (attempt - 1))
             try:
                 r = self.t.send("GET", url, {"User-Agent": UA}, None, 120)
-            except (Transport.PreSend, Transport.Ambiguous):
+            except (Transport.PreSend, Transport.Ambiguous) as e:
+                self.download_problem = f"no answer from {_host(url)} ({e})"
                 continue
             if self._transient(r.status):
+                self.download_problem = f"{_host(url)} answered HTTP {r.status}"
                 continue
             if not 200 <= r.status < 300:
+                # Until Nov 20 this was silent — and it was the whole story of "the pictures were made but never
+                # came": they're on mp.astria.ai, behind the same Cloudflare check as the API.
+                ref = explain(r)
+                self.download_problem = f"{_host(url)}: {ref.message}"
+                _note_refusal("GET", f"picture on {_host(url)}", r, ref, 0)
+                if ref.kind == "challenge" and not ref.route.endswith("+browser"):
+                    continue                                 # (a check the window wasn't asked about yet: once more)
                 return None
             if is_picture(r.body):
+                self.download_problem = ""
                 return r.body
+            self.download_problem = f"{_host(url)} sent something that isn't a picture"
         return None
 
     def poll_images(self, tune: int, pid: int, expected: int | None, max_ticks: int = 320,
@@ -1326,7 +1358,12 @@ class Client:
             kept = self.keep_prompt(tune, pid)
             if failed_msg:
                 raise AIError("failed", failed_msg + (f" (what Astria said is saved in {kept})" if kept else ""))
-            raise AIError("timed_out" if not known else "network")
+            if known:                                        # made, but not one of them could be fetched: say so
+                why = getattr(self, "download_problem", "")
+                raise AIError("network", f"Astria made {len(known)} picture{'s' if len(known) != 1 else ''} but "
+                                         f"{'they' if len(known) != 1 else 'it'} couldn't be downloaded"
+                                         + (f" — {why}" if why else "") + ".")
+            raise AIError("timed_out")
         return got
 
     def last_prompt_failure(self, pid: int) -> str | None:
