@@ -3401,6 +3401,25 @@ Implemented from the improvement report's top items.
 
 Tests: `ui2/t_viewer_swap.py` in the session scratchpad.
 
+#### 6au Viewer: an HDR photo is shown once, in HDR; the Astria.ai Browser's way back (Mac, Nov 20, 2026)
+
+- **HDR photos no longer flash a standard-range version first.** The viewer used to put Qt's picture up at once
+  (standard range, not colour-managed) and swap macOS's HDR picture in when `viewer_surface` had read it — a
+  dimmer, differently coloured version, then a jump. Now, with the native surface there (`self.hdr`), a photo
+  that is HDR — or not yet known not to be — is **held** (`MediaViewer._held`, `HDR_HOLD_MS` 900): the image stage
+  stays empty, `_image_ready` doesn't show Qt's picture for it, and the photo appears when `_hdr_shown(True)`
+  switches to the HDR stage. An ordinary photo is released the moment `_hdr_ready` says so (the check reads the
+  file's first megabyte on a worker thread and is asked ahead for the neighbours, `_check_hdr`, so stepping
+  doesn't wait). Fallbacks, all ending in Qt's picture as before: the hold running out (a slow drive, a huge
+  photo — the HDR picture still takes over when it comes), macOS unable to read it (`_hdr_failed`), the surface
+  not built yet (`show_picture` False), or no surface at all (other systems). A slideshow's time on an HDR photo
+  starts when it appears. Tested with a stand-in surface (`hdr_hold/t.py`); **not seen on a Mac** — if a held
+  photo ever shows black for the whole 0.9 s, that's `viewer_surface` taking that long and worth a look.
+- **Astria.ai Browser ▸ a picture ▸ back.** The picture view is its own window; on a small display it opened
+  taller than the screen, its title bar out of reach, and nothing in it led back. It now has a **‹ Back to
+  Astria.ai Browser** button at the top of its side panel, Esc / ⌘W / ⌘[ / ⌫ and a double-click on the picture all
+  go back (`ViewerWindow.back` raises the browser), and it's never sized past the screen it opens on.
+
 ## 7. Downloaders (from the broader project + this session)
 
 > **Nov 15, 2026 — every downloader's plain requests go through `mac/net_fetch.py`** (length-checked, resumable,

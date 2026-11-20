@@ -1228,7 +1228,11 @@ class ViewerWindow(QWidget):
         self.full: OrderedDict[str, bytes] = OrderedDict()     # the last few pictures, as downloaded
         self.asked: set[str] = set()
         self.setStyleSheet(_style(browser.theme))
-        self.resize(1180, 820)
+        # Never larger than the screen it opens on: on a small display the title bar (and its close button) used
+        # to end up off the top, which left no way back to the browser.
+        screen = (browser.screen() or QGuiApplication.primaryScreen())
+        room = screen.availableGeometry() if screen is not None else QRect(0, 0, 1280, 800)
+        self.resize(min(1180, room.width() - 40), min(820, room.height() - 60))
         self.bridge = _Bridge()
         self.bridge.full.connect(self._got_full)
         h = QHBoxLayout(self)
@@ -1241,6 +1245,11 @@ class ViewerWindow(QWidget):
         v = QVBoxLayout(side)
         v.setContentsMargins(14, 14, 14, 12)
         v.setSpacing(8)
+        # The way back, in plain sight (Nov 20: "there is no way to go back to the main Astria.ai Browser view").
+        self.back_btn = QPushButton("‹  Back to Astria.ai Browser")
+        self.back_btn.setToolTip("Back to all the pictures (Esc)")
+        self.back_btn.clicked.connect(self.back)
+        v.addWidget(self.back_btn)
         self.model = QLabel("")
         self.model.setObjectName("SheetTitle")
         self.model.setWordWrap(True)
@@ -1283,10 +1292,25 @@ class ViewerWindow(QWidget):
         nav.addWidget(self.next_btn)
         v.addLayout(nav)
         h.addWidget(side)
-        for keys, slot in (("Left", lambda: self.step(-1)), ("Right", lambda: self.step(1)), ("Escape", self.close),
+        for keys, slot in (("Left", lambda: self.step(-1)), ("Right", lambda: self.step(1)), ("Escape", self.back),
+                           ("Ctrl+W", self.back), ("Ctrl+[", self.back), ("Backspace", self.back),
                            ("Space", lambda: self.item is not None and self.b.toggle(self.item)),
                            ("Ctrl+D", self._download), ("Ctrl+C", self._copy_image)):
             QShortcut(QKeySequence(keys), self).activated.connect(slot)
+
+    def back(self) -> None:
+        """Back to the browser: this window closes and the browser comes forward, on the picture last looked at."""
+        browser = self.b
+        self.close()
+        browser.show()
+        browser.raise_()
+        browser.activateWindow()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 — a double-click on the picture goes back too
+        if self.picture.geometry().contains(event.position().toPoint()):
+            self.back()
+        else:
+            super().mouseDoubleClickEvent(event)
 
     def _index(self) -> int:
         return self.b.view.pos.get(self.item.key, -1) if self.item is not None else -1

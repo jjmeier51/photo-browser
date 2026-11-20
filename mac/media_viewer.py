@@ -82,6 +82,7 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif"
               ".dng", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2"}
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", ".m2ts", ".ts", ".wmv", ".flv"}
 SLIDE_SECONDS = 3.0
+HDR_HOLD_MS = 900             # how long an HDR photo may take to appear before its standard-range picture stands in
 CHROME_BG = "#000000"                    # the bars are the stage's own black: no strip above or below the picture
 REST, FULL = 0.62, 1.0                   # how strong the controls are: at rest, and under the mouse
 IDLE_SECONDS = 2.6                       # the mouse still this long: the controls fade away
@@ -1459,6 +1460,12 @@ class MediaViewer(QWidget):
         self.fit_window = True
         self._fit_target: QSize | None = None
         self._hdr_cache: dict[str, bool] = {}
+        self._hdr_asked: set[str] = set()                  # photos whose HDR check is under way
+        self._hdr_failed: set[str] = set()                 # HDR photos macOS couldn't show: Qt's picture it is
+        self._held = ""                                    # the photo on show that's waiting for its HDR picture
+        self._hold = QTimer(self)                          # …for no longer than HDR_HOLD_MS
+        self._hold.setSingleShot(True)
+        self._hold.timeout.connect(self._hold_over)
         self._was_playing = False
         self.setWindowTitle("Viewer")
         self.setStyleSheet(VIEWER_STYLE)
@@ -1800,18 +1807,31 @@ class MediaViewer(QWidget):
             self.video.stop()
             self.stack.setCurrentWidget(self.image)
             img = self.loader.get(path)
-            if img is None:
+            hdr = self._hdr_cache.get(path) if self.hdr is not None else False
+            self._hold.stop()
+            self._held = ""
+            if hdr is None or (hdr and path not in self._hdr_failed):
+                # An HDR photo is shown once, in HDR. Qt's standard-range picture used to stand in until macOS
+                # had read the HDR one — a dimmer, differently coloured version flashing up first, which read
+                # as the wrong picture (Nov 20). Now nothing stands in: the photo appears when it's ready
+                # (typically a fraction of a second), and only a slow read falls back to the stand-in.
+                # (Not known yet whether it's HDR: the answer is a millisecond's read away — `_hdr_ready`.)
+                self._held = path
+                self.image.show_image(None, "")
+                self._hold.start(HDR_HOLD_MS)
+                if hdr:
+                    self._show_hdr(path)
+            elif img is None:
                 self.image.show_image(None, "")
             else:
                 self.image.show_image(img, "" if not img.isNull() else "This photo can't be shown.")
                 if self.slideshow:
                     self._slide.start(int(SLIDE_SECONDS * 1000))
-            if self._hdr_cache.get(path):
-                self._show_hdr(path)
         for d in (1, -1, 2):                                    # read ahead
             j = self.index + d
             if 0 <= j < len(self.paths) and not is_video(self.paths[j]):
                 self.loader.request(self.paths[j])
+                self._check_hdr(self.paths[j])                  # …and whether it's HDR, so stepping never waits
         if self.info.isVisible():
             self.fill_info()
         self._zoom_label()
@@ -1819,6 +1839,10 @@ class MediaViewer(QWidget):
 
     def _image_ready(self, path: str, img: QImage) -> None:
         if path == self.current and not is_video(path):
+            if self._held == path:                             # an HDR photo (or maybe one): not the stand-in
+                return
+            if self.hdr is not None and self.stack.currentWidget() is self.hdr:
+                return                                          # the HDR picture is already on show
             self.image.show_image(img, "" if not img.isNull() else "This photo can't be shown.")
             if self.slideshow:
                 self._slide.start(int(SLIDE_SECONDS * 1000))
@@ -2028,38 +2052,85 @@ class MediaViewer(QWidget):
             hdr = self._hdr_cache.get(path)
             if hdr is None:
                 hdr = False
-                sig = self._hdr_read
-
-                def check() -> None:
-                    found = media_info.image_hdr(path)
-                    try:
-                        sig.emit(path, found)
-                    except RuntimeError:                 # the viewer was closed meanwhile
-                        pass
-                threading.Thread(target=check, daemon=True).start()
+                self._check_hdr(path)
         self.res_badge.setText(res)
         self.res_badge.setVisible(bool(res))
         self.hdr_badge.setVisible(hdr)
 
+    def _check_hdr(self, path: str) -> None:
+        """Whether the photo is HDR, read on a worker thread (the file's first megabyte) → `_hdr_ready`."""
+        if path in self._hdr_cache or path in self._hdr_asked or is_video(path):
+            return
+        self._hdr_asked.add(path)
+        sig = self._hdr_read
+
+        def check() -> None:
+            found = media_info.image_hdr(path)
+            try:
+                sig.emit(path, found)
+            except RuntimeError:                         # the viewer was closed meanwhile
+                pass
+        threading.Thread(target=check, daemon=True).start()
+
     def _hdr_ready(self, path: str, hdr: bool) -> None:
         self._hdr_cache[path] = hdr
-        if path == self.current:
+        self._hdr_asked.discard(path)
+        if len(self._hdr_cache) > 4000:                    # a long session through a big folder
+            for old in list(self._hdr_cache)[:2000]:
+                self._hdr_cache.pop(old, None)
+        if self.paths and path == self.current:
             self.hdr_badge.setVisible(hdr)
-            if hdr and not is_video(path):
+            if is_video(path):
+                return
+            if hdr and self.hdr is not None and path not in self._hdr_failed:
                 self._show_hdr(path)
+            elif self._held == path:                       # an ordinary photo after all: shown at once
+                self._release_hold()
+
+    def _release_hold(self) -> None:
+        """The photo on show isn't waiting for an HDR picture (any more): Qt's picture is shown — now if it's
+        read, else the moment it is (`_image_ready`)."""
+        path, self._held = self._held, ""
+        self._hold.stop()
+        if not path or not self.paths or path != self.current or is_video(path):
+            return
+        if self.hdr is not None and self.stack.currentWidget() is self.hdr:
+            return
+        img = self.loader.get(path)
+        if img is not None:
+            self.image.show_image(img, "" if not img.isNull() else "This photo can't be shown.")
+            if self.slideshow:
+                self._slide.start(int(SLIDE_SECONDS * 1000))
+
+    def _hold_over(self) -> None:
+        """The HDR picture is taking long (a slow drive, a huge photo): the standard one stands in after all —
+        the HDR one still takes its place when it's there."""
+        self._release_hold()
 
     def _show_hdr(self, path: str) -> None:
         """An HDR photo, in HDR: macOS reads it (its gain map, or its HLG / PQ curve) while Qt's standard-range
         picture stands in; `_hdr_shown` swaps it in when it's ready."""
         if self.hdr is not None and self.hdr.path != path:
-            self.hdr.show_picture(path, self.media_size(path))
+            if not self.hdr.show_picture(path, self.media_size(path)) and self._held == path:
+                self._release_hold()                       # macOS's surface isn't there (yet): Qt's picture, now
 
     def _hdr_shown(self, ok: bool) -> None:
-        if not ok or self.hdr is None or not self.paths or self.hdr.path != self.current:
+        if self.hdr is None or not self.paths or self.hdr.path != self.current:
             return
+        path = self.current
+        if not ok:                                         # macOS couldn't read it in HDR: Qt's picture it is
+            self._hdr_failed.add(path)
+            if self._held == path:
+                self._release_hold()
+            return
+        waiting = self._held == path
+        self._held = ""
+        self._hold.stop()
         if self.stack.currentWidget() is self.image and self.image.fitted:   # not if it's been zoomed meanwhile
             self.stack.setCurrentWidget(self.hdr)
             self._zoom_label()
+            if waiting and self.slideshow:                 # (its time on screen starts now)
+                self._slide.start(int(SLIDE_SECONDS * 1000))
 
     def _show_labels(self) -> None:
         self._show_to_delete()
