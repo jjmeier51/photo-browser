@@ -123,7 +123,9 @@ class Door(QObject):
         profile = QWebEngineProfile("astria", QApplication.instance())       # kept: the clearance lasts between launches
         profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
         profile.downloadRequested.connect(self._download_asked)
-        self.tmp = tempfile.mkdtemp(prefix="pb-astria-door-")
+        self.tmp = tempfile.mkdtemp(prefix="pb-door-")
+        import atexit
+        atexit.register(shutil.rmtree, self.tmp, True)       # (also when the app ends without its event loop quitting)
         QApplication.instance().aboutToQuit.connect(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
         self.window = QWidget()
         self.window.setWindowTitle("Astria — Cloudflare's check")

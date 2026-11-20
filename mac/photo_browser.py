@@ -387,6 +387,12 @@ def glyph(name: str, color: str | None = None, size: int = 16) -> QIcon:
         p.setBrush(c)
         p.drawPath(star_path(QPointF(s * 0.42, s * 0.56), s * 0.34))
         p.drawPath(star_path(QPointF(s * 0.78, s * 0.24), s * 0.17))
+    elif name == "swap":                                   # the two sides trade places: ⇄
+        for y, (a, b) in ((0.36, (0.2, 0.8)), (0.66, (0.8, 0.2))):
+            p.drawLine(QPointF(s * a, s * y), QPointF(s * b, s * y))
+            back = 0.16 if b > a else -0.16
+            p.drawLine(QPointF(s * b, s * y), QPointF(s * (b - back), s * (y - 0.13)))
+            p.drawLine(QPointF(s * b, s * y), QPointF(s * (b - back), s * (y + 0.13)))
     elif name == "split":                                  # two panes side by side
         p.drawRoundedRect(QRectF(s * 0.12, s * 0.2, s * 0.76, s * 0.6), 2, 2)
         p.drawLine(QPoint(int(s * 0.5), int(s * 0.22)), QPoint(int(s * 0.5), int(s * 0.78)))
@@ -4333,6 +4339,10 @@ class Pane(QWidget):
         self.split_btn = self._tool("split", "Split View (⌘\\) — a second pane beside this one, to move or copy "
                                     "files into (the SSD, say)", None, "Seg")
         self.split_btn.setCheckable(True)
+        self.swap_btn = self._tool("swap", "Swap Sides (⇧⌘\\) — what's on the left goes to the right, and what's "
+                                   "on the right to the left", None, "Seg")
+        self.swap_btn.setVisible(False)                    # only means something in Split View
+        h.addWidget(self.swap_btn)
         h.addWidget(self.split_btn)
         root.addWidget(header)
 
@@ -4868,7 +4878,7 @@ class Pane(QWidget):
 
     def restyle(self) -> None:
         for b in (self.back_btn, self.fwd_btn, self.sort_btn, self.new_folder_btn, self.tags_btn, self.grid_btn,
-                  self.list_btn, self.photos_btn, self.split_btn):
+                  self.list_btn, self.photos_btn, self.split_btn, self.swap_btn):
             b.setIcon(glyph(b.property("glyph"), THEME.secondary if b.objectName() == "Nav" else THEME.text, 16))
         self.filter_btn.setIcon(glyph("funnel", THEME.accent if self.any_filter() else THEME.secondary, 16))
         self._slider_icons()
@@ -5852,6 +5862,7 @@ class Pane(QWidget):
             set_to_delete=lambda p, on: self.set_to_delete([p], on, quiet=True),
             age_of=self._age_of,
             set_cover=self.cover_from_viewer, edit_photo=self.edit_photo,
+            edit_with_ai=self.ai_edit, shown=self._follow_viewer,
             extra={"frame_note": frame_export.engine_note})
         # Opens over Photo Browser for Mac's window, as tall as its display, and takes each item's shape within that.
         viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None, box=self.window().geometry())
@@ -5936,6 +5947,24 @@ class Pane(QWidget):
         viewer.show()
         viewer.raise_()
         viewer.activateWindow()
+
+    def _follow_viewer(self, path: str) -> None:
+        """The viewer moved to `path` (← → there): the highlight here moves with it — when that file is in the
+        listing on show — so closing the viewer leaves the last file looked at selected, in view. A pane that has
+        gone somewhere else meanwhile is left as it is."""
+        if not self.is_virtual and os.path.dirname(path.rstrip(os.sep)) != self.location:
+            return                                           # (the folder model knows every path: only this folder's)
+        try:
+            idx = self.index_for(path)
+        except Exception:  # noqa: BLE001
+            return
+        if not idx.isValid():
+            return
+        sel = self.grid.selectionModel()
+        if sel.currentIndex() == idx and sel.isSelected(idx) and len(sel.selectedRows()) <= 1:
+            return
+        sel.setCurrentIndex(idx, sel.SelectionFlag.ClearAndSelect | sel.SelectionFlag.Rows)
+        self.view().scrollTo(idx)
 
     def _reveal_from_viewer(self, path: str) -> None:
         self.window().raise_()
@@ -8985,6 +9014,8 @@ class MainWindow(QMainWindow):
         self._dst_ready = False
         self.dst.split_btn.setVisible(False)
         self.src.split_btn.clicked.connect(lambda on: self.set_split(bool(on)))
+        self.src.swap_btn.clicked.connect(lambda _on=False: self.swap_sides())
+        self.dst.swap_btn.clicked.connect(lambda _on=False: self.swap_sides())
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setHandleWidth(1)
         split.addWidget(self.sidebar)
@@ -9085,6 +9116,8 @@ class MainWindow(QMainWindow):
         self.dst.setVisible(on)
         self.action_bar.setVisible(on)
         self.src.chip.setVisible(on)                   # FROM/TO only mean something side by side
+        self.src.swap_btn.setVisible(on)
+        self.dst.swap_btn.setVisible(on)
         self.src.split_btn.setChecked(on)
         self.src.split_btn.setToolTip("Close Split View (⌘\\)" if on else
                                       "Split View (⌘\\) — a second pane beside this one, to move or copy files "
@@ -9101,6 +9134,32 @@ class MainWindow(QMainWindow):
         if act is not None:
             act.setChecked(on)
         self.update_actions()
+
+    def swap_sides(self) -> None:
+        """Split View ▸ Swap Sides: the folder (or search, or collection) on the left is shown on the right and the
+        one on the right on the left — each with the view and order remembered for it. FROM stays the left pane
+        and TO the right, so a transfer set up one way round can be turned round with one press."""
+        if not self.split:
+            self.set_split(True)
+            return
+        left, right = self.src.location, self.dst.location
+        if not left or not right:
+            return
+        if left == right:
+            self.active_pane.note("Both sides show the same place.")
+            return
+        for loc, frm, to in ((left, self.src, self.dst), (right, self.dst, self.src)):
+            if loc.startswith(SEARCH) and loc in frm.searches:   # a search goes over with what was searched
+                to.searches[loc] = frm.searches[loc]
+        picked = (self.src.selection().paths, self.dst.selection().paths)
+        self.src.go(right)
+        self.dst.go(left)
+        for pane, paths in ((self.dst, picked[0]), (self.src, picked[1])):
+            if len(paths) == 1:                              # the one file that was highlighted stays highlighted
+                pane._pending_reveal = paths[0]
+                QTimer.singleShot(0, pane._try_reveal)
+        self.update_actions()
+        self.active_pane.note("Swapped the two sides.", "Swap Back", self.swap_sides)
 
     def _navigate(self, path: str) -> None:
         if path == "@places":                  # the sidebar's Library: windows of their own

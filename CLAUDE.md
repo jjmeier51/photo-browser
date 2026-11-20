@@ -302,7 +302,10 @@ actions the app makes no network calls.
   (`mac/pdf_contents.py`: labels, folio offset, the chapter's title); a **Contents** list, a chapter menu, `[`/`]`,
   ‹ Back, ⌘G. The viewer re-derives `QPdfView`'s page layout (`_page_rects`) to map clicks — §6w-2.
   Photo Browser for Mac opens as **one window**; **Split View** (header button, View ▸ Split View ⌘\\, remembered; `--to`
-  forces it) adds the To pane and the Move/Copy bar for transfers (`MainWindow.set_split` — §6r).
+  forces it) adds the To pane and the Move/Copy bar for transfers (`MainWindow.set_split` — §6r); **Swap Sides**
+  (⇄ in each pane's header, ⇧⌘\\ — `MainWindow.swap_sides`) trades what the two panes show. The viewer's ⋯ menu has
+  **Edit with AI…** (`Hooks.edit_with_ai`) and **the pane's highlight follows the viewer** (`Hooks.shown` →
+  `Pane._follow_viewer`) — §6at.
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
   "Add from iOS Album" (import then delete the iOS originals), save drive media
   to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,

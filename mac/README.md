@@ -179,7 +179,10 @@ SSD) on the right, with the Move/Copy bar below — and the same again closes it
 Copy in Split View…** opens it with your selection kept. The To pane opens on the folder it was last on
 (else the SSD), and Photo Browser for Mac remembers which way you left it. Select files or folders on the left and
 press **Move to “Extreme SSD”** (or Copy), or drag them onto the right pane — onto a folder there to put
-them inside it. Drags from the real Finder work too, onto either pane.
+them inside it. Drags from the real Finder work too, onto either pane. **Swap Sides** — the ⇄ button in each
+pane's header, or **View ▸ Swap Sides** (**⇧⌘\\**) — puts what's on the left on the right and what's on the
+right on the left (From stays the left pane and To the right, so it turns a transfer round); the toast's
+**Swap Back** undoes it.
 
 **Selecting with a box**, as in Finder: drag from anywhere that isn't a picture or a name — the space
 around a thumbnail or beside its name, a list row's other columns or the space after its name, the
@@ -490,7 +493,9 @@ drags the files, as everywhere else). Each folder remembers it, like icons and l
 
 **One frame at a time**: in the viewer, the two buttons either side of Play step a video one frame back or
 forward (hold one down and it keeps going) — also **,** and **.**, or **⇧←** and **⇧→**. The time then shows to
-the millisecond, with the frame number when you point at it. **⋯ ▸ Use as Album Cover** makes the photo — or
+the millisecond, with the frame number when you point at it. **⋯ ▸ Edit with AI…** opens the photo on show in the Edit
+with AI form. As you step through files with ← →, **the highlight in the window behind follows** — so when you
+close the viewer, the last file you looked at is the one selected. **⋯ ▸ Use as Album Cover** makes the photo — or
 the video frame you've stopped on — the cover of its folder; **⋯ ▸ Edit Photo…** opens the photo editor.
 
 **Double-click a photo or video** (or press Return) — in any view — and it opens in the viewer instead of

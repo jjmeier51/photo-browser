@@ -3383,6 +3383,24 @@ Implemented from the improvement report's top items.
   now ease highlights to 3× SDR white with `CIToneMapHeadroom` (iOS 18+) and trim 0.15 EV (0.3 EV on
   iOS 17): `FileActions.hdrFrameHeadroom` / `hdrFrameExposureTrim` to tune.
 
+#### 6at Viewer: Edit with AI, the highlight follows; Split View: Swap Sides (Mac, Nov 20, 2026)
+
+- **Viewer ⋯ ▸ Edit with AI…** (photos; `media_viewer.Hooks.edit_with_ai` → `Pane.ai_edit`): the photo on show
+  opens in the Edit with AI form, as from the right-click menu. A slideshow stops for it.
+- **The highlight follows the viewer.** `Hooks.shown(path)` is called from `MediaViewer.show_current`, and
+  `Pane._follow_viewer` moves the pane's selection (and scrolls) to that file — so stepping with ← → and closing
+  the viewer leaves the last file looked at highlighted, not the one it was opened on. Only when the file is in
+  the listing on show: a folder listing checks the file's folder first (`QFileSystemModel` has an index for any
+  path on disk, which would otherwise "select" a file that isn't there), a collection asks its own model; a pane
+  that has gone elsewhere is left as it is.
+- **Split View ▸ Swap Sides** (`MainWindow.swap_sides`; a ⇄ button in each pane's header, shown only in Split
+  View — glyph "swap"; View ▸ Swap Sides ⇧⌘\): what the left pane shows goes to the right and the right's to the
+  left — folders, collections, and a search (its `SearchRun` is handed over with it). FROM stays the left pane and
+  TO the right, so a transfer set up one way round is turned round with one press. A single highlighted file stays
+  highlighted on its new side; the toast offers Swap Back; the same place on both sides is said, not swapped.
+
+Tests: `ui2/t_viewer_swap.py` in the session scratchpad.
+
 ## 7. Downloaders (from the broader project + this session)
 
 > **Nov 15, 2026 — every downloader's plain requests go through `mac/net_fetch.py`** (length-checked, resumable,

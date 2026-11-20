@@ -120,6 +120,8 @@ class Hooks:
     age_of: Callable[[str, float | None], str] | None = None   # (path, when taken) → "27 · born …" (folder birthdays)
     set_cover: Callable[[str, float | None], str] | None = None   # (path, a video's seconds) → what to say
     edit_photo: Callable[[str], None] | None = None           # the photo → the photo editor
+    edit_with_ai: Callable[[str], None] | None = None         # the photo → Edit with AI (ai_window.py)
+    shown: Callable[[str], None] | None = None                # the viewer moved to this file (the pane's highlight follows)
     extra: dict = field(default_factory=dict)
 
 
@@ -1611,6 +1613,8 @@ class MediaViewer(QWidget):
         self.cover_act.setVisible(self.hooks.set_cover is not None)
         self.edit_act = menu.addAction("Edit Photo…", lambda: self.hooks.edit_photo(self.current))
         self.edit_act.setVisible(self.hooks.edit_photo is not None)
+        self.ai_act = menu.addAction("Edit with AI…", self.edit_with_ai)
+        self.ai_act.setVisible(self.hooks.edit_with_ai is not None)
         self.tags_act = menu.addAction("Tags…", self.edit_tags)
         self.reveal_act = menu.addAction("Show in Folder", self.reveal)
         menu.addAction("Open With Default App", self.open_external)
@@ -1773,6 +1777,12 @@ class MediaViewer(QWidget):
         self.frame_btn.setEnabled(video)
         self.loop_act.setVisible(video)
         self.edit_act.setVisible(not video and self.hooks.edit_photo is not None)
+        self.ai_act.setVisible(not video and self.hooks.edit_with_ai is not None)
+        if self.hooks.shown is not None:                    # the pane's highlight follows the file on show
+            try:
+                self.hooks.shown(path)
+            except Exception:  # noqa: BLE001 — a pane that has moved on is no reason to stop showing
+                pass
         self._exact_time = False
         self.remove_act.setVisible(not video and self.hooks.remove_objects is not None)
         self._show_labels()
@@ -2333,6 +2343,14 @@ class MediaViewer(QWidget):
         self._hdr_cache.pop(path, None)
         if self.paths and path == self.current:
             self.show_current()
+
+    def edit_with_ai(self) -> None:
+        """⋯ ▸ Edit with AI…: the photo on show, in the Edit with AI form (the slideshow stops for it)."""
+        if self.hooks.edit_with_ai is None or not self.paths or is_video(self.current):
+            return
+        if self.slideshow:
+            self.toggle_slideshow()
+        self.hooks.edit_with_ai(self.current)
 
     def remove_objects(self) -> None:
         if self.hooks.remove_objects is not None and self.paths and not is_video(self.current):

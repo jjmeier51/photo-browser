@@ -283,6 +283,8 @@ def install(win, sf) -> None:
                 tip="A second pane beside this one, with Move and Copy, for transfers")
     split.setCheckable(True)
     split.setChecked(win.split)
+    act(v, "Swap Sides", lambda: win.swap_sides(), "Ctrl+Shift+\\", lambda: bool(win.split),
+        tip="In Split View: what's on the left goes to the right, and what's on the right to the left")
     v.addSeparator()
     hls = act(v, "Show Highlights", lambda: pane().set_bubbles_on(not pane().bubbles_on()), None, None,
               "The round highlight folders above a folder's files — the iPhone app's bubbles")
