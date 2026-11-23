@@ -179,7 +179,8 @@ actions the app makes no network calls.
   for it); `thumb_helper.swift` writes 8-bit sRGB; `thumb_key` versions HEIF/AVIF/JXL (no file reads there) — §6ag.
   **Its caches persist** (§6aq): thumbnails in Application Support/…/Thumbnails (`app_identity.thumb_cache`, **not
   Caches** — macOS empties that when space runs low), kept under 20 GB by `prune_thumbs` (least recently used first,
-  daily); folder covers found by scanning and video lengths in `facts.sqlite` (`mac/facts_store.py`, `_Facts(kind=…)`)
+  daily); **View ▸ Cache All Thumbnails…** / a folder's Cache Thumbnails… makes them ahead
+  (`mac/thumb_cache_window.py` → `Thumbnails.warm`; which files need one is decided on the walk's thread — §6aw); folder covers found by scanning and video lengths in `facts.sqlite` (`mac/facts_store.py`, `_Facts(kind=…)`)
   — every key carries a modified time, a cover is re-checked when handed out, "nothing found" is never kept.
   **In-place photo edits are undoable** (§6as): `batch_crop.write_in_place(path, data, label=…)` keeps the original
   first (`mac/edit_undo.py`, on the Mac) and the main window turns each finished job into an undo step — so any new

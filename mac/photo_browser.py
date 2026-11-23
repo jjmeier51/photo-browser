@@ -92,6 +92,7 @@ import search_query
 import themes
 import ui_extras
 import thumb_color
+import thumb_cache_window
 import capcut
 import media_info
 import metadata_edit
@@ -1702,7 +1703,8 @@ class Thumbnails(QObject):
         self._warm: set[str] = set()                   # keys being made ahead…
         self._warm_jobs: dict[str, _ThumbJob] = {}     # …their jobs, while waiting (a tile's ask moves one up)
         self._wanted: set[str] = set()                 # …that a tile on screen has asked for meanwhile
-        self.warmed = 0                                # thumbnails made ahead this session
+        self.warmed = 0                                # thumbnails made ahead this session (tried: made or not)
+        self.warm_failed = 0                           # …of those, the ones that couldn't be made
         self._signals = _ThumbSignals()
         self._signals.done.connect(self._done, Qt.ConnectionType.QueuedConnection)
         self._signals.skipped.connect(self._pending.discard, Qt.ConnectionType.QueuedConnection)
@@ -1758,6 +1760,28 @@ class Thumbnails(QObject):
         """Thumbnails being made ahead that aren't ready yet."""
         return len(self._warm)
 
+    def warm_lanes(self) -> int:
+        return self._warm_pool.maxThreadCount()
+
+    def set_warm_lanes(self, n: int) -> None:
+        """How many thumbnails are made ahead at once — two beside an export; Cache All Thumbnails widens it
+        while it runs (thumb_cache_window.py) and gives it back."""
+        self._warm_pool.setMaxThreadCount(max(1, int(n)))
+
+    def cancel_warm(self, everything: bool = False) -> int:
+        """Thumbnails queued ahead that haven't been started are dropped (Cache All Thumbnails ▸ Stop). With
+        `everything`, the ones under way are let go of too — for ones nothing is coming back for (a helper
+        that died); one that does come back after all is simply kept. Returns how many were dropped."""
+        dropped = 0
+        for key, job in list(self._warm_jobs.items()):
+            if self._warm_pool.tryTake(job) or everything:
+                self._warm.discard(key)
+                self._warm_jobs.pop(key, None)
+                self._wanted.discard(key)
+                self._pending.discard(key)
+                dropped += 1
+        return dropped
+
     def _request(self, key: str, path: str, gen: int | None, priority: int) -> None:
         if key in self._pending:
             if key in self._warm:
@@ -1777,6 +1801,8 @@ class Thumbnails(QObject):
             self._warm.discard(key)
             self._warm_jobs.pop(key, None)
             self.warmed += 1
+            if img.isNull():
+                self.warm_failed += 1
             if key not in self._wanted:                # made for the disk only: memory keeps what's on screen
                 return
             self._wanted.discard(key)
@@ -6110,6 +6136,46 @@ class Pane(QWidget):
         win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
         win.show()
 
+    def cache_thumbnails(self, folder: str | None = None) -> None:
+        """Cache All Thumbnails… (View menu — the iPhone's command) / right-click a folder ▸ Cache Thumbnails
+        Here…: every photo and video's thumbnail made ahead and kept on the Mac, so folders open with their
+        pictures ready (thumb_cache_window.py). Without a folder it's the whole drive the pane is on — or, on
+        the Mac's own disk, the folder on show (never the whole Mac)."""
+        if THUMBS is None:
+            return
+        if folder is None:
+            here = self.location if self.location and not self.is_virtual and os.path.isdir(self.location) else ""
+            if not here:
+                self.note("Open a folder first — its drive's thumbnails are cached from there.")
+                return
+            root = str(engine.volume_root(Path(here)))
+            folder = here if root == os.sep else root
+        if not os.path.isdir(folder):
+            return
+        name = os.path.basename(folder.rstrip(os.sep)) or folder
+        whole = str(engine.volume_root(Path(folder))) == folder.rstrip(os.sep) and folder != os.sep
+        for w in _VIEWERS:                                 # one run at a time: the one under way comes forward
+            if isinstance(w, thumb_cache_window.ThumbCacheWindow) and w.running:
+                w.raise_()
+                w.activateWindow()
+                self.note("Thumbnails are already being cached — one run at a time.")
+                return
+        win = thumb_cache_window.ThumbCacheWindow(
+            THUMBS, [folder], f"“{name}”" + (" — the whole drive" if whole else " and the folders inside it"),
+            is_media=lambda p: kind_of(p) in ("image", "video"), key_of=thumb_key,
+            cached=lambda key: thumb_file(key).is_file(), where="Application Support ▸ Thumbnails" if IS_MAC else "",
+            parent=self.window())
+        win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        def done(made: int, have: int, failed: int) -> None:
+            if made:
+                self.note(f"{made:,} thumbnail{'s' if made != 1 else ''} cached for “{name}”.")
+                self.grid.viewport().update()
+        win.finished.connect(done)
+        _VIEWERS.append(win)
+        win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
+        win.show()
+
     def find_duplicates(self, folder: str | list[str]) -> None:
         """Find Duplicates… (duplicates_window.py — the iPhone's): likely copies in `folder` — or in several
         folders looked at as one — ticked and moved to the Trash from there."""
@@ -7247,6 +7313,8 @@ class Pane(QWidget):
         so the commands say "Here" rather than "Inside"."""
         menu.addAction("Find Duplicates in This Folder…" if here else "Find Duplicates…",
                        lambda: self.find_duplicates(folder))
+        menu.addAction("Cache Thumbnails Here…" if here else "Cache Thumbnails…",
+                       lambda: self.cache_thumbnails(folder))
         menu.addAction("Rename Files Here…" if here else "Rename Files Inside…", lambda: self.rename_many([folder]))
         menu.addAction("Remove Leading Spaces from Names Here…" if here else "Remove Leading Spaces from Names…",
                        lambda: self.remove_leading_spaces(folder))

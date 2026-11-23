@@ -420,6 +420,16 @@ too (`facts.sqlite` in the same folder), so folders don't have to be looked thro
 Export All Frames makes each frame's thumbnail while the export is still running, so the frames folder opens with
 every thumbnail ready; the window says "Thumbnails ready." when the last one is made.
 
+### Cache All Thumbnails
+
+Every thumbnail the app makes is kept on the Mac (above), so a folder you've looked at once opens with its
+pictures ready from then on. **View ▸ Cache All Thumbnails…** makes them all ahead of time — every photo and video
+on the drive the window is showing — and right-click a folder ▸ **Cache Thumbnails…** does one folder and what's
+inside it. A small window shows how far it is (how many were already cached, how many it has made, any that
+couldn't be made) with **Stop**; you can keep using the app while it runs, and running it again only does what's
+new. It's the iPhone app's Cache All Thumbnails; each app keeps its own thumbnails (they aren't shared through the
+drive).
+
 ### More themes, Christmas wallpapers and typefaces
 
 View ▸ Theme… now has 70 looks: new everyday ones (Slate, Espresso, Nordic, Charcoal and Gold, Lavender Mist, Mint,

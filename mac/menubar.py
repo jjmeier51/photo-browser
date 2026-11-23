@@ -217,6 +217,10 @@ def install(win, sf) -> None:
     tight.setCheckable(True)
     v.aboutToShow.connect(lambda: tight.setChecked(pane().mode() == "grid" and pane().tight()))
 
+    act(v, "Cache All Thumbnails…", lambda: pane().cache_thumbnails(), None,
+        tip="Every photo and video's thumbnail on this drive made now and kept on the Mac, so folders open with "
+            "their pictures ready (the iPhone app's Cache All Thumbnails). A folder: right-click ▸ Cache "
+            "Thumbnails…")
     act(v, "Use This View for Every Folder", lambda: pane().use_view_everywhere(), None,
         tip="Folders remember how they were last shown; this shows them all the way this one is")
     theme = v.addMenu("Theme")

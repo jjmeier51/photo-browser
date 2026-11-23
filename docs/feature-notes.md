@@ -3477,6 +3477,20 @@ through, both ways:
    one at a time (QuickLook drops requests under load); and the result says how many were skipped, if any. PDFs
    are cached too (tiles show them).
 
+**The Mac (same day): thumbnails are cached, and there's a Cache All Thumbnails there too.** Checked first:
+everything the Mac makes reaches its disk cache — `_ThumbJob` (PIL/Qt), `_QuickLookRunner` (both `_save_thumb`)
+and `_FrameRunner` (the helper writes straight to `thumb_file(key)`) — in Application Support ▸ Thumbnails, read
+back by the next launch without touching the photo (`thumbs_t/t_mac.py` does exactly that with two `Thumbnails`).
+What was missing was a way to make them ahead: **View ▸ Cache All Thumbnails…** (the drive the pane is on; on
+the Mac's own disk, the folder on show — never the whole Mac) and right-click a folder ▸ **Cache Thumbnails…**
+(`Pane.cache_thumbnails` → `mac/thumb_cache_window.py`). A worker thread walks (hidden folders and dot-files
+out) and decides *off the window's thread* which files have no thumbnail yet (`thumb_key` + `thumb_file`, both
+pure); the window feeds those to `Thumbnails.warm` 48 at a time while fewer than 96 are waiting, on lanes
+widened for the run (`set_warm_lanes`, given back after). `Thumbnails` gained `warm_failed`, `warm_lanes`,
+`set_warm_lanes`, `cancel_warm(everything=)`. Stop drops what hasn't started; a helper that never answers is
+given up on after 4 minutes of nothing finishing; one run at a time. The Mac's key is the **full path** + mtime
+(the iPhone's is parent + name), so renaming a folder re-makes its thumbnails on the Mac — known, left.
+
 Rules that follow: **`precache` must store exactly what `produce` would** (key, standard range, JPEG 0.8), and
 **an `Entry` with no size/date is not a key** — anything keyed `path|mtime|size` from a huge-folder entry must
 stat first. Not compiled or run here.
