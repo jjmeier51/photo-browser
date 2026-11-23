@@ -1353,6 +1353,13 @@ download takes it first, then everything else. If nothing is found, the log says
 in `~/Library/Logs/Photo Browser for Mac/facebook-hub-….json` (it stays on your Mac) — send that along if you are
 subscribed and it still comes up empty.
 
+**Profiles with no subscriber content.** Most profiles have none, and the download simply carries on to their
+photos and videos. The **Exclusive content** box (beside *Only exclusive*) is the switch: ticked, each run looks for
+subscriber-only content first; unticked, it doesn't look at all and goes straight to the photos. The choice is
+remembered. Even when it's ticked, a profile found to have none isn't looked through for it again for two weeks
+(tick *Check every photo again* or *Only exclusive* to look right away), and nothing that goes wrong while looking
+stops the rest of the download.
+
 Long Facebook runs no longer hold the app up: the reading happens off the window, the browser shows a blank page
 while it runs, and the tags are saved once every 90 seconds. The whole log is kept in
 `~/Library/Logs/Photo Browser for Mac/facebook-downloads.log`, with a line whenever the window was held up for more

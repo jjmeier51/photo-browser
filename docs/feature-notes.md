@@ -4293,6 +4293,41 @@ Nothing is deleted by it — it marks things to go through later (sidebar ▸ Ta
 - **Tiles**: a red disc with a white bin beside the heart (`marks_of`, `draw_labels`).
 - `TO_DELETE_TAG = "to-delete"` in both `photo_browser.py` and `media_viewer.py` (the viewer is imported lazily).
 
+### 7.4h-4 Facebook: profiles with no Subscriber Hub — the run goes on, and the hub is a choice (Nov 23, 2026)
+
+"The Facebook downloader breaks for people who don't have exclusive content / a subscriber hub. Have the
+downloader proceed if there is no subscriber hub, or give the user the option to select or unselect subscriber
+hub content." Both. (The Mac's downloader: since Nov 17 the hub is read *first*, so anything wrong in it stood in
+front of every photo. The iPhone's has had `includeSubscriberHub` all along and reads the hub beside the rest.)
+
+What stood in the way on a profile with no hub, from reading `_hub` / `run`:
+
+- **Guessed addresses.** With no subscriber tab on the profile, `hub_urls` are tried. A guess was *opened and
+  scrolled to its end* (`HUB_PATIENCE`, up to 15 minutes) as soon as a plain read stayed on a subscriber-looking
+  address — and Facebook answers `?sk=subscriber_hub` / `?sk=exclusive_content` with **the ordinary profile under
+  the same address**. That is the whole public timeline, scrolled before a single photo was downloaded, possibly
+  three times over. Now a guess gets **a first look without scrolling** (`("visit", url, False)`) and is read to
+  its end only if what that shows says subscribers (`social.exclusive_in_text`); otherwise "nothing on it says
+  subscribers — not the hub". A tab the profile itself shows is opened as before.
+- **Anything going wrong in the pass ended the run.** An exception in `_hub` ended the generator; a login page
+  behind a wrong address could leave `reader.wall` set, and `run` returned "Facebook asked for a fresh login"
+  with nothing downloaded. Now: `_hub` is called inside `try` (the error is noted, "carrying on with the photos"),
+  and a wall that appeared in a pass that found no hub is cleared — the profile itself had just opened.
+- **Every run paid for it.** Two browser visits and up to seven counted reads on each run of each profile. `_hub`
+  now returns **None for "there's none"** (a number, 0 included, when there is a hub); `Outcome.hub` is "none" /
+  "found"; the window keeps it in the profile's record (`hub`: `{"state", "at"}`) and `run` doesn't look again
+  for `HUB_RECHECK` (14 days) unless `opts.full` ("Check every photo again") or `opts.exclusive_only` asks.
+- **The choice.** `social.Options.exclusive` (default True) ← the window's new **Exclusive content** box
+  (`facebook/exclusive`, remembered). Off: no visit, no guess — "isn't asked for — straight to the photos".
+  Unticking it unticks and greys "Only exclusive".
+
+Tests (scratchpad `fb3/`): `t_nohub.py` — a profile with no hub downloads its photos; the profile-under-the-same-
+address guess is looked at once and never scrolled; an error and a wall in the pass don't end the run; unticked
+means no look, even where there is a hub; "none" is remembered, re-looked on full / only-exclusive / after two
+weeks; `t_box.py` — the box, its hold on "Only exclusive", the option reaching the run, the record. The earlier
+`fb2/t_hub.py`, `t_win.py`, `t_visit.py` still pass. **Not run against facebook.com** — which of the above was
+the break on the real profile isn't known; if a run still stops, the log (`facebook-downloads.log`) has the line.
+
 ### 7.4i Google Drive in Photo Browser for Mac — `mac/gdrive.py`, `mac/gdrive_window.py` (Nov 20, 2026)
 
 **Asked for:** "similar to the iOS app, add a Google Drive downloader… one or more files or complete folders… It

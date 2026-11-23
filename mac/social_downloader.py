@@ -248,12 +248,24 @@ class SocialWindow(QMainWindow):
         self.full.setToolTip("Read every uploaded and tagged photo, even where an earlier run already got to the "
                              "end — finds an old photo tagged since. Slower.")
         self.full.setVisible(kind == "facebook")
+        self.excl = option("Exclusive content", "exclusive", True,
+                           "Look for subscriber-only content first (the creator's Subscriber Hub), tagged "
+                           "“exclusive”. Untick it for profiles that have none: the download then goes straight "
+                           "to the photos and videos. (A profile found to have none isn't looked through for it "
+                           "again for two weeks either way.)")
+        self.excl.setVisible(kind == "facebook")
         self.only_excl = option("Only exclusive", "exclusive_only", False,
                                 "Only the subscriber-only content (the Subscriber Hub) — quick. A full download takes "
                                 "it too, first, tagged “exclusive” all the same.")
         self.only_excl.setVisible(kind == "facebook")
         self.only_excl.toggled.connect(lambda on: self.full.setEnabled(not on and not self.running))
         self.full.setEnabled(not self.only_excl.isChecked())
+        # "Only exclusive" means nothing without the exclusive content: unticking that unticks this
+        self.excl.toggled.connect(lambda on: (self.only_excl.setEnabled(on and not self.running),
+                                              self.only_excl.setChecked(False) if not on else None))
+        self.only_excl.setEnabled(self.excl.isChecked())
+        if not self.excl.isChecked():
+            self.only_excl.setChecked(False)
         self.photos_2x = option("Upscale photos 2×", "photos2x", False,
                                 "Each photo twice the size, in place" +
                                 (" (photos under 200 KB always are)" if kind == "facebook" else ""))
@@ -278,7 +290,8 @@ class SocialWindow(QMainWindow):
         top.addWidget(self.go_btn)
         top.addWidget(self.stop_btn)
         row2 = QHBoxLayout()
-        for w in (self.tagged, self.stories, self.only_excl, self.full, self.photos_2x, self.ai, self.videos_1080):
+        for w in (self.tagged, self.stories, self.excl, self.only_excl, self.full, self.photos_2x, self.ai,
+                  self.videos_1080):
             row2.addWidget(w)
         row2.addStretch(1)
         row2.addWidget(login)
@@ -447,8 +460,9 @@ class SocialWindow(QMainWindow):
                                    videos_1080=self.videos_1080.isChecked(), tagged=self.tagged.isChecked() or fbk,
                                    stories=self.stories.isChecked(), upscale_under=SMALL_PHOTO if fbk else 0,
                                    full=fbk and self.full.isChecked() and not self.only_excl.isChecked(),
-                                   exclusive_only=fbk and self.only_excl.isChecked())
-        for w in (self.go_btn, self.tagged, self.stories, self.only_excl, self.full, self.photos_2x, self.ai,
+                                   exclusive_only=fbk and self.only_excl.isChecked() and self.excl.isChecked(),
+                                   exclusive=fbk and self.excl.isChecked())
+        for w in (self.go_btn, self.tagged, self.stories, self.excl, self.only_excl, self.full, self.photos_2x, self.ai,
                   self.videos_1080, self.field):
             w.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -1089,6 +1103,8 @@ class SocialWindow(QMainWindow):
         if self.kind == "facebook" and self.record is not None:
             self.info["walked"] = self._walked(outcome)
             self.info["albums"] = self._album_ends(outcome)
+            if getattr(outcome, "hub", ""):              # subscriber-only content: there, or looked for and not
+                self.info["hub"] = {"state": outcome.hub, "at": int(time.time())}
         self._save()
         if self.exif is not None:
             self.exif.close()
@@ -1120,8 +1136,9 @@ class SocialWindow(QMainWindow):
         self._log(line)
         self._flush_log()
         self._say(line)
-        for w in (self.go_btn, self.tagged, self.stories, self.only_excl, self.photos_2x, self.videos_1080, self.field):
+        for w in (self.go_btn, self.tagged, self.stories, self.excl, self.photos_2x, self.videos_1080, self.field):
             w.setEnabled(True)
+        self.only_excl.setEnabled(self.excl.isChecked())
         self.full.setEnabled(not self.only_excl.isChecked())
         if self.kind == "facebook":
             self.view.load(QUrl(self.k["home"]))         # the browser back for the person (it was blank for the run)

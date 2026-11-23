@@ -47,6 +47,13 @@ True)` — its posts are drawn by the page's own scripts, which the watcher copi
 next to nothing), and every set, photo, video and reel in what it loaded is read (`hub_media`): sets walked whole,
 the rest one by one (`_single`). The profile and cover pictures (`header_ids`) and its public albums are left out.
 Nothing found: what Facebook showed is saved to ~/Library/Logs/<app>/facebook-hub-*.json for the next fix.
+**Most profiles have no such content, and the run goes on to their photos regardless** (Nov 23): `_hub` returns
+None for "there's none", which the record keeps (`hub`: state "none" + when) so the profile isn't looked through
+for it again for `HUB_RECHECK` (two weeks — unless "Check every photo again" or "Only exclusive" asks); a guessed
+address gets a first look without scrolling and is read to its end only if that says subscribers (Facebook
+answers some guesses with the ordinary profile under the same address — scrolling that was the whole public
+timeline); an error or a login page inside the hub pass is noted and the run carries on; and
+`Options.exclusive` False ("Exclusive content" unticked) skips the pass altogether.
 Elsewhere a photo or video whose page says it's for subscribers (`social.exclusive_in_text`, near its own id) counts
 too. All of it is tagged "exclusive" — and files downloaded before are tagged when a run meets them again
 (`("tag", paths, tags)`).
@@ -81,6 +88,7 @@ GAP, JITTER = 0.35, 0.4           # seconds between page reads, to begin with (i
 MIN_GAP, MAX_GAP = 0.25, 8.0      # the most and the least it adapts to
 PER_MINUTE = 50                   # page reads in any 60 seconds to begin with…
 HUB_PATIENCE = 12                 # scroll steps with nothing new before the Subscriber Hub counts as read to its end
+HUB_RECHECK = 14 * 86400          # a profile found to have no subscriber content isn't looked through for it again this long
 FAST_PER_MINUTE = 75              # …raised a step after every EASED_AFTER quick, whole answers in a row, up to this
 SLOW_PER_MINUTE = 30              # …and cut at any sign of trouble, down to this
 EASED_AFTER = 120
@@ -497,6 +505,7 @@ class Outcome:
     # — the record's `albums`, so the next run carries on from where each ended (once they all downloaded).
     albums: dict = field(default_factory=dict)
     reads: int = 0                    # pages read this run
+    hub: str = ""                     # subscriber-only content: "found", "none" (looked, there's none), "" (not looked)
 
 
 class _Reader:
@@ -773,7 +782,13 @@ def _short(url: str) -> str:
 
 def _hub(reader: _Reader, profile: "Profile", profile_page: str, skip: set[str], seen: set[str], folder: Path,
          count: list[int]):
-    """yield from: the creator's subscriber-only content (module notes), tagged "exclusive". Returns how many new.
+    """yield from: the creator's subscriber-only content (module notes), tagged "exclusive". Returns how many new
+    — or **None when the profile has none** (most profiles: no tab for subscribers, and none of the addresses
+    Facebook has used shows any), which the run takes as "carry on with the photos".
+
+    A guessed address is only read to its end once a first look at it says subscribers: Facebook answers some of
+    them (`?sk=…`) with the ordinary profile under the same address, and scrolling that to its end — the whole
+    public timeline — held a run up for many minutes before anything was downloaded (Nov 23).
 
     Found as the person finds it: the profile opened in the window's browser and its tab for subscribers looked
     for ("Subscriptions", "Exclusive"… — `tab_links`), under "More" too; only when there's none are the iPhone's
@@ -827,6 +842,17 @@ def _hub(reader: _Reader, profile: "Profile", profile_page: str, skip: set[str],
                 yield ("note", f"   {_short(url)}: went to {_short(final)} instead")
                 continue
             extra = [got]
+            # A first look, without scrolling: is this a subscriber page at all — or the profile again?
+            peek = yield ("visit", url, False)
+            peek = peek if isinstance(peek, dict) else {}
+            peek["asked"] = url + " (first look)"
+            visits.append(peek)
+            looked = [a for a in peek.get("answers") or [] if isinstance(a, str)] + [peek.get("html") or "", got]
+            if peek.get("status") == 404 or looks_like_login(peek.get("html") or "", peek.get("url") or url) \
+                    or not TAB_HREF.search(peek.get("url") or url) \
+                    or not any(social.exclusive_in_text(x) for x in looked):
+                yield ("note", f"   {_short(url)}: nothing on it says subscribers — not the hub")
+                continue
         seen_h = yield ("visit", url, True, "", "", HUB_PATIENCE)
         seen_h = seen_h if isinstance(seen_h, dict) else {}
         seen_h["asked"] = url
@@ -859,7 +885,7 @@ def _hub(reader: _Reader, profile: "Profile", profile_page: str, skip: set[str],
         saved = dump_visits(visits, profile.vanity or profile.id)
         yield ("note", "   no subscriber-only content found — you may not be subscribed, or this profile has no "
                        "Subscriptions" + (f" (what Facebook showed is saved in {saved})" if saved else ""))
-        return 0
+        return None
     visits.clear()
     before = count[0]
     for token in tokens:
@@ -909,7 +935,29 @@ def run(link: str, person: Path, already_for, opts: social.Options):
 
     # Subscriber-only ("Exclusive") content first: the creator's Subscriber Hub (module notes) — a run that's stopped
     # or cut short has it, and everything it finds is `seen`, so the sweep below doesn't take it again untagged.
-    yield from _hub(reader, profile, page, skip, seen, folder, count)
+    # Most profiles have none, and the run must go on to their photos all the same: the hub is skipped when it
+    # isn't asked for (`opts.exclusive`), not looked for again for a while once a profile was found to have none,
+    # and nothing that goes wrong in it — an error, a login page behind a wrong address — ends the run.
+    noted = record(folder).get("hub")
+    none_at = float(noted.get("at") or 0) if isinstance(noted, dict) and noted.get("state") == "none" else 0.0
+    if not (opts.exclusive or opts.exclusive_only):
+        yield ("note", "Subscriber-only (Exclusive) content isn't asked for — straight to the photos.")
+    elif none_at and time.time() - none_at < HUB_RECHECK and not (opts.full or opts.exclusive_only):
+        yield ("note", f"No subscriber-only content was found here on {time.strftime('%d %b', time.localtime(none_at))} "
+                       "— not looked for again yet (“Check every photo again” or “Only exclusive” looks now).")
+    else:
+        walled = reader.wall
+        try:
+            got_hub = yield from _hub(reader, profile, page, skip, seen, folder, count)
+        except Exception as e:  # noqa: BLE001 — the photos are what most runs are for: the hub never costs them
+            got_hub = None
+            yield ("note", f"   the subscriber-only content couldn't be read ({type(e).__name__}: {e}) — carrying "
+                           "on with the photos")
+        else:
+            out.hub = "none" if got_hub is None else "found"
+        if got_hub is None and reader.wall and not walled:
+            reader.wall = False                            # a wrong address's login page: the profile itself opened
+            yield ("note", "   (a subscriber address asked for a login — the profile itself is open: carrying on)")
     if opts.exclusive_only or reader.wall:
         if opts.exclusive_only:
             yield ("note", "Only the subscriber-only content was asked for — done.")
