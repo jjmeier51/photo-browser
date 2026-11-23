@@ -267,6 +267,25 @@ nonisolated enum SharedTags {
         return out
     }
 
+    /// The file read loosely, for one the strict decode refuses (a value of an unexpected type somewhere in
+    /// it): every entry that is a list keeps its strings, anything else is dropped. nil when it isn't the
+    /// file at all. One odd entry must not make the whole file count as unreadable.
+    static func lenientFile(_ data: Data) -> File? {
+        guard let doc = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let rawFiles = doc["files"] as? [String: Any] else { return nil }
+        func table(_ raw: [String: Any]) -> [String: [String]] {
+            var out: [String: [String]] = [:]
+            for (key, value) in raw {
+                if let list = value as? [Any] { out[key] = list.compactMap { $0 as? String } }
+            }
+            return out
+        }
+        return File(format: doc["format"] as? String, version: (doc["version"] as? NSNumber)?.intValue,
+                    id: doc["id"] as? String, updated: (doc["updated"] as? NSNumber)?.doubleValue,
+                    by: doc["by"] as? String, files: table(rawFiles),
+                    labels: (doc["labels"] as? [String: Any]).map(table))
+    }
+
     /// Reads the drive's file, merges it with `local` (drive-relative) against the base its `id`
     /// has in `bases`, and writes the result back when the drive's copy differs. With `carry`, every
     /// file whose tags changed (every tagged file, the first time) gets its own attributes written too.
@@ -277,8 +296,25 @@ nonisolated enum SharedTags {
         let url = fileURL(root: root)
         guard fm.fileExists(atPath: root.path) else { return .failed("The drive isn't connected.") }
         var remote: File?
-        if let data = try? Data(contentsOf: url) {
-            remote = try? JSONDecoder().decode(File.self, from: data)   // damaged: treated as a new file
+        if Library.existsOrDamaged(url) {
+            // It's there, so it has to be read. A file that couldn't be read *this time* (an external drive
+            // that's busy or just woke) used to count as "no file yet": this phone's copy was written over it
+            // under a new id, and whatever the Mac had added since the last sync — tags, Favorites, To AI —
+            // was gone. Now the sync waits for the next try instead.
+            var data = try? Data(contentsOf: url)
+            if data == nil {
+                Thread.sleep(forTimeInterval: 0.3)
+                data = try? Data(contentsOf: url)
+            }
+            guard let data else {
+                return .failed("The drive's tag file couldn't be read just now — it will be tried again.")
+            }
+            remote = (try? JSONDecoder().decode(File.self, from: data)) ?? lenientFile(data)
+            if remote == nil, !data.isEmpty {
+                // Not the file at all (torn by a pulled drive): kept beside it, then started afresh.
+                let aside = url.deletingLastPathComponent().appendingPathComponent("shared-tags unreadable.json")
+                try? DriveWriter.writeDataSync(data, to: aside)
+            }
         }
         var theirs: [String: [String]] = [:]
         for (key, list) in remote?.files ?? [:] where isShared(key) {

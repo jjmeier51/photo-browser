@@ -281,6 +281,7 @@ class TagFile:
         self.labels: dict[str, list[str]] = {}     # key → labels ("favorite", "ai")
         self.id = ""
         self.damaged = False                       # it was there but couldn't be read (started afresh on save)
+        self.unread = False                        # it's there, but reading it failed this time (a busy drive)
         self._stamp: tuple[int, int] | None = None  # (mtime_ns, size) of what was read
         self._checked = 0.0
 
@@ -302,12 +303,16 @@ class TagFile:
         return key if self.base is None else os.path.join(str(self.base), key)
 
     def keys_under(self, path: str) -> list[str]:
-        """`path`'s own key and, for a folder, the keys of everything tagged inside it."""
+        """`path`'s own key and, for a folder, the keys of everything tagged **or labelled** inside it (a file
+        that's only a Favorite has no tags: left out, a trashed folder put back by Undo lost the hearts inside)."""
         k = self.key(path)
         if k is None:
             return []
         prefix = k.rstrip("/") + "/"
-        return [x for x in self.files if x == k or x.startswith(prefix)]
+        out = [x for x in self.files if x == k or x.startswith(prefix)]
+        seen = set(out)
+        out += [x for x in self.labels if (x == k or x.startswith(prefix)) and x not in seen]
+        return out
 
     # -- reading
     def refresh(self, force: bool = False) -> None:
@@ -329,12 +334,22 @@ class TagFile:
             return
         self._stamp = stamp
         try:
-            with open(self.file, encoding="utf-8") as f:
-                doc = json.load(f)
+            with open(self.file, "rb") as f:
+                data = f.read()
+        except OSError:
+            # There, but not readable this time (a drive that's busy or just woke). That is not "damaged": what
+            # was read before stays, it's tried again at the next look, and nothing is written over it meanwhile
+            # (`save`) — a file started afresh here would lose what the iPhone put in it.
+            self._stamp = None
+            self.unread = True
+            return
+        self.unread = False
+        try:
+            doc = json.loads(data.decode("utf-8"))
             raw = doc.get("files") if isinstance(doc, dict) else None
             if not isinstance(raw, dict):
                 raise ValueError("no “files” table")
-        except (OSError, ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError):
             self.files, self.labels, self.id, self.damaged = {}, {}, "", True
             return
         files: dict[str, list[str]] = {}
@@ -376,7 +391,12 @@ class TagFile:
             pass                                       # a backup is a nicety; never stop a change for it
 
     def save(self) -> None:
-        """Write the whole table back. Raises OSError (drive gone, read-only, full)."""
+        """Write the whole table back. Raises OSError (drive gone, read-only, full — or the file is there but
+        couldn't be read just now: writing would replace it with less than it holds)."""
+        if self.unread:
+            self.refresh(force=True)
+            if self.unread:
+                raise OSError(f"“{self.file.name}” on the drive couldn't be read just now — try again in a moment")
         self.back_up()
         if not self.id:
             self.id = str(uuid.uuid4()).upper()
@@ -405,6 +425,7 @@ class TagFile:
         self._stamp = (st.st_mtime_ns, st.st_size)
         self._checked = time.monotonic()
         self.damaged = False
+        self.unread = False
 
 
 def default_store() -> "TagStore":

@@ -901,6 +901,8 @@ Select items and right-click ▸ **Favorite** / **To AI** (or Photos ▸ Favorit
 every selected item already has it takes it off (Unfavorite / Remove To AI). A favorite shows a white heart on its
 tile, a To AI item the iPhone's sparkles. The sidebar's **Labels** section shows how many there are and opens
 either as a list of everything with it — on this Mac and every connected drive (Go ▸ Favorites / To AI too).
+**Folders can be favorites as well as files**, exactly as on the iPhone: a favorited folder has the heart on its
+tile and is in the Favorites list beside the photos and videos.
 
 They are the iPhone app's Favorites and To AI, both ways: they're kept in the drive's shared tag file
 (`.Photo Browser Metadata/shared-tags.json`, beside the tags, under `labels`), and the app merges that with its

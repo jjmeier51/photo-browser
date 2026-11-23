@@ -3420,6 +3420,35 @@ Tests: `ui2/t_viewer_swap.py` in the session scratchpad.
   Astria.ai Browser** button at the top of its side panel, Esc / ⌘W / ⌘[ / ⌫ and a double-click on the picture all
   go back (`ViewerWindow.back` raises the browser), and it's never sized past the screen it opens on.
 
+#### 6av Favorites shared between the apps — folders and files — checked end to end (Nov 23, 2026)
+
+Asked: "double check and ensure Folder favorites and Content favorites are shared across the two apps." Both are
+one thing on both sides: a path in `Library.favorites` (iPhone) / a key in `labels` (Mac), whether it names a
+folder or a file; the drive's `.Photo Browser Metadata/shared-tags.json` carries them (`labels`, §6h). The read
+through, both ways:
+
+- **iPhone → drive**: every favorite under the root goes in, folders included (`isShared` only leaves out hidden
+  paths); every setter reaches `noteTagsEdited()` — `toggleFavorite`, `setFavorite`, and moves / prunes /
+  restores through `persistAllPathKeyed`. Swift compares strings by canonical equivalence, so a name spelled
+  decomposed on one side and precomposed on the other is the same key there; the Mac folds keys to NFC.
+- **Mac**: `taggable` takes folders; the heart is drawn on folder tiles; `LabelScanner` lists folders and files;
+  rename (`renamed`), transfers (`placed` holds every file *and* folder), Duplicate and WebP→JPEG carry labels.
+- **Two things were wrong, both fixed:**
+  1. **Undo of a trashed folder lost the hearts inside it** (Mac). `TagFile.keys_under` listed only *tagged*
+     items, so a file that was a Favorite and nothing else wasn't remembered by `_said_about`. It lists labelled
+     keys too now.
+  2. **A shared file that couldn't be read for a moment was replaced** (both apps). The iPhone's
+     `SharedTags.sync` took a failed `Data(contentsOf:)` for "no file yet" and wrote its own copy under a new
+     id — whatever the Mac had added since the last sync (tags, Favorites, To AI) was gone; the Mac's `TagFile`
+     took an `OSError` for "damaged" and started afresh on the next save. Now: iPhone — if the file is there
+     (`Library.existsOrDamaged`) it must be read (one retry), else the sync fails and is tried again later; a
+     strict-decode failure falls back to `lenientFile` (keeps every well-formed entry), and only a file that
+     isn't JSON at all is started afresh, with the bytes kept beside it as "shared-tags unreadable.json". Mac —
+     `TagFile.unread`: what was read before stays, and `save` refuses (an `OSError` the callers already show)
+     until the file reads again.
+- Tested on the Mac side against a file shaped as the iPhone writes it (`fav_t/t.py`: folder and file hearts in,
+  out, renamed, trashed + undone, moved, the unreadable moment). **The Swift is not compiled or run.**
+
 ## 7. Downloaders (from the broader project + this session)
 
 > **Nov 15, 2026 — every downloader's plain requests go through `mac/net_fetch.py`** (length-checked, resumable,
