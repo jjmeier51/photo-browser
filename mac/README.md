@@ -633,22 +633,38 @@ Mac/python, with any Python on the Mac), then Make Book appears. `bookify.py` st
 
 **Pictures in the book.** When you press Make Book it first asks **"Would you like to add pictures to this
 book?"** — Add Pictures, No Pictures, or Cancel. Either way the book is made. With Add Pictures, the **Pictures**
-window then opens over the finished book:
+window then opens over the finished book. On the left are your pictures and the choices for the one selected; on
+the right is **the page as it will be** — the real page, set again the moment you change anything.
 
-- **Add Pictures…** — choose one or more photos, from the Mac or the drive (JPEG, PNG, HEIC, WebP, TIFF…).
-  **Open the Book** shows the book just made, so you can look through it while you decide.
-- For each picture say **where** it goes: *At the front* (after the title page), *At the start of a chapter*
-  or *At the end of a chapter* (pick the chapter — the list shows each one's page), *On a page* (type a page
-  number of the book as it is now), or *At the end of the book*.
-- …and **how**: *A page of its own* (the whole page, nothing else on it), *Across the text*, or *Half the
-  width* — plus an optional **caption** under it.
-- **Add … to the Book** sets the book again with the pictures in and puts it in place of the one just made.
+Where a picture can go — anywhere:
 
-A picture placed "on a page" stays with the text that was on that page, so it lands there or just after, and the
-pages after it move on (the contents page is renumbered by itself). Your choices are remembered for that text —
-the next time you make it into a book they're offered again — and **Pictures…** beside Open reopens the window to
-add, move or remove pictures. From Terminal:
-`python3 bookify.py story.txt --picture "map.jpg@front" --picture "storm.jpg@chapter 4,wide,The storm"`.
+- **Beside the text** — at the left or right, with the paragraph you put it at (and the ones after it, as many as
+  fit) flowing round it;
+- **Between two paragraphs** — at the left, in the middle or at the right;
+- **A page of its own** — after any paragraph;
+- **At the front**, **at the start or end of a chapter**, **at the end of the book** — on a page of its own or in
+  the text.
+
+How to put it there:
+
+- Go to the page you want with **◀ ▶** or the page number (or **Find** some words from the text), then **Add
+  Pictures…** — new pictures land beside the text on the page you're looking at.
+- **Click a paragraph** on the page: the selected picture goes there. **Drag the picture** onto another paragraph
+  to move it — drop it on the left or right half and it takes that side. **◀ Earlier / Later ▶** move it one
+  paragraph at a time.
+- **Drag a corner** of the picture to make it larger or smaller — any size — or use the **Width** slider (a per
+  cent of the text's width). Beside the text a picture can take up to 70 %, so there's room for words next to it.
+- Add a **caption** if you like; it sits under the picture.
+
+If a picture doesn't fit where you put it (too tall for what's left of the page), it starts the next page, as it
+would in any book — the window shows that page and says so; make it smaller or put it a paragraph earlier to keep
+it where it was. **Add … to the Book** then sets the whole book again with the pictures in and puts it in place of
+the one just made.
+
+A picture stays with its paragraph however the pages move (the contents page is renumbered by itself). Your
+choices are remembered for that text — the next time you make it into a book they're offered again — and
+**Pictures…** beside Open reopens the window to add, move, resize or remove pictures. From Terminal:
+`python3 bookify.py story.txt --picture "map.jpg@front" --picture "storm.jpg@chapter 4,40%,The storm"`.
 
 **A contents page you can click.** In a book made here, every line of the contents page — the chapter's name and
 its page number — is a link to that chapter, and the chapters are the PDF's outline (the sidebar in Preview and

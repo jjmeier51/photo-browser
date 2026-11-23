@@ -1869,6 +1869,71 @@ without links or outline (leaders with 4 front-matter pages; no leaders with 6; 
 title), the viewer (real mouse clicks on numbers and titles at fit-width and zoomed, Back, the list, the menu,
 chapter steps, the page box) and the window's whole pictures flow.
 
+## 6w-3. Make Book: pictures beside the text, placed and sized freely, on a live page — `mac/bookify.py`, `mac/book_pictures.py` (Nov 23, 2026)
+
+**Asked for:** "allowing the user to embed pictures next to text/paragraphs. Give the user full autonomy as to
+where the pictures go, giving them previews, and allowing them to free form modify the size of the pictures."
+Before this a picture could be a page of its own, across the text or half its width, placed by chapter or by a
+typed page number, with no picture of the result until the book was made again.
+
+**The typesetter (`bookify.py`).**
+
+- **Text flowing round a picture.** `where: "beside"` + `index` (the paragraph) + `side`. `beside_flowable`
+  builds a `Beside` — ReportLab's `ImageAndFlowables` — from a `FloatPicture` (a compact flowable: the picture at
+  exactly the asked width with its caption under it; it answers the `_restrictSize` / `_unRestrictSize` /
+  `_oldDrawSize` that class asks of an Image) and a list of paragraphs: the picture's own paragraph and up to
+  `FLOAT_REACH` (14) after it. `ImageAndFlowables` splits them itself: what fits beside the picture is set to the
+  width that's left, the rest across the page, over a page break if need be. `build_story` gathers the
+  paragraphs (`floating`, `settle()`): a chapter, section, scene break, drop-cap opening or another picture ends
+  the gathering. A chapter's first paragraph with a picture beside it loses its drop cap (`opening_paragraph(…,
+  dropcap=False)`): text can flow round one thing. Two pictures beside the same paragraph: the first floats, the
+  second goes under it (known; the window doesn't prevent it).
+- **Any width.** `width` — a part of the text's width, 0.08–1 (`picture_width`; `size: "free"`); beside the text
+  at most `FLOAT_MOST` (0.7). `align` left / center / right for a picture between paragraphs. A width asked for
+  outright may use 90 % of the page's height (the old "wide" / "half" keep 62 %); a float 85 %. A picture too
+  tall for its width is drawn as large as fits — the window says so. Captions sit under the picture at its width,
+  not across the page.
+- **Where everything landed.** `BookDoc.afterFlowable` → `_seen` records, per paragraph, its pages *and boxes*
+  (`state.el_boxes`: page, x, y, w, h in points) — for the pieces inside an `ImageAndFlowables` too (`_C0` beside
+  the picture, `_C1` under it; a piece after a page break is a plain `ImageAndFlowables`, which is why the test is
+  for that class). Pictures note their own box when drawn (`_note_picture` → `state.pic_boxes`).
+- **`Draft` — one page, fast.** The text is read once (`_setup`, shared with `make_book`); `Draft.page(pictures,
+  top, out, real_page=, head=, follow=, follow_el=)` sets the stretch from element `top` (`build_story(span=…)`:
+  no title page or contents; the state before the stretch — chapter count, opening / after-a-break — is walked
+  through so the first lines look as they will) and returns the page's boxes. A left-hand page gets one blank
+  page before it so its margins are that side's; `folio_offset` makes the folio the real one; `Mark("head")`
+  gives the running head. `follow` / `follow_el`: when the picture (or paragraph) was carried on to one of the
+  next three pages, that page is the one described (`pushed`). Pictures are read and sized once per draft
+  (`_prepared`). The paper is flat (the texture is the slow part). ~0.1 s a page on the test text. `Draft.plate`
+  is a page-of-its-own picture.
+
+**The window (`book_pictures.py`; `book_window.py` only opens it, with `options=self.options()` so the draft is
+set as the book is).** Left: the pictures (what each is, where) and the selected one's choices — Where (7 kinds),
+Paragraph (◀ Earlier / Later ▶), Chapter, Side / Place, Width (slider + box), Caption. Right: `PagePreview` — the
+page image (QtPdf) with the boxes to take hold of:
+
+- click a paragraph → the picture goes there (`picked`); drag the picture → dropped on a paragraph, at the side
+  of the half it's dropped on (`moved`); drag a corner → `width_for`: the opposite corner stays, shape kept, the
+  larger of the across / up-down pulls counts (`resized`); click another picture → it's selected (`chose`);
+- ◀ ▶ / the page box go through the pages of the book as made that have text (`page_tops`: page → the element it
+  starts with; a chapter heading, section heading or scene break right before it is included — `_top_for`); Find
+  goes to a paragraph with the words and marks it;
+- every change re-sets the page on a worker thread (`_typeset`, one at a time, the latest wins; 70 ms debounce);
+- new pictures land beside the text on the page in view, one paragraph after another, right then left.
+
+`placements()` gives `make_book` entries; `_from_placement` reads them back, old-style ones too ("wide" → 100 %,
+"half" → 50 %, "on page N" → the paragraph there). Buttons are not auto-default: Return in Find or the caption
+presses nothing.
+
+**Limits, said plainly.** The preview page starts at the paragraph that begins that page *in the book as made*;
+a paragraph that began on the page before is shown whole, and with several pictures on earlier pages the real page
+breaks drift — the picture stays with its paragraph regardless, and the made book is the truth. Not tried on a
+Mac: the dragging (tested by sending the mouse events offscreen), and how it feels on a long novel.
+
+Tests (scratchpad `book2/`): `t_engine.py` (flow round, widths, sides, the page preview's boxes and speed, the
+old kinds), `t_window.py` (place by click, drag, corner-resize, slider, Find, kinds, reopen), `t_flow.py` (Make
+Book → Pictures → the book set again; remembered), and the earlier `book/test_bookify.py` / `test_contents.py`.
+
 ## 6q. Photo Browser for Mac Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py` (Nov 3, 2026)
 
 A port of §2 (same three kinds, kept apart, same threshold 6, same normalized names, same Oldest/Newest from

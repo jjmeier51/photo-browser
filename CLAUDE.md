@@ -294,10 +294,17 @@ actions the app makes no network calls.
   plans, `mac/pdf_helper.swift` draws vectors (Qt pictures as fallback) — §6v.
   Photo Browser for Mac's **Make Book PDF** (right-click a .txt/.md/.rtf, or File menu; `mac/book_window.py` → the person's
   `mac/bookify.py`, ReportLab): the text typeset like a printed book beside it, incl. an iPhone-screen page size — §6w.
-  **Make Book asks "add pictures?" first, makes the book, then opens the Pictures window** (`PicturesDialog`: each
-  picture at the front / a chapter's start or end / on a page / the end; a page of its own, across the text or half
-  width; a caption) and sets the book again in place (`BookHooks.replace`; `bookify.make_book(pictures=…)`, "on a
-  page" kept as "after that paragraph"). bookify's contents entries are links and the chapters are the PDF outline.
+  **Make Book asks "add pictures?" first, makes the book, then opens the Pictures window**
+  (`mac/book_pictures.py` `PicturesDialog`): a picture goes **anywhere** — beside the text with the paragraphs
+  flowing round it (`where: "beside"`, `side`; `bookify.Beside` = ReportLab's `ImageAndFlowables`), between two
+  paragraphs, a page of its own after any paragraph, the front, a chapter's start/end, the end — at **any width**
+  (`width`, a part of the text's width; ≤ `FLOAT_MOST` beside the text), with a caption. The window shows **the
+  page as it will be** (`bookify.Draft.page`: the stretch of the book from that page's first element, set in
+  ~0.1 s, with every paragraph's and picture's box — `el_boxes`, `pic_boxes`): click a paragraph, drag the picture,
+  drag a corner. A picture is tied to its *paragraph* (element index), never a page. The book is then set again in
+  place (`BookHooks.replace`; `bookify.make_book(pictures=…)`). Anything new that lays text out must keep
+  `BookDoc._seen` fed (it's how pages and boxes are known). bookify's contents entries are links and the chapters
+  are the PDF outline. §6w-3.
   **The PDF viewer follows a click on a contents entry** — real links itself (`follow_link`: this Qt's `QPdfView`
   doesn't), and contents pages that are only text by reading the clicked line and resolving the printed number
   (`mac/pdf_contents.py`: labels, folio offset, the chapter's title); a **Contents** list, a chapter menu, `[`/`]`,
