@@ -2332,7 +2332,7 @@ final class Library {
     private(set) var thumbnailCacheTask: Task<Void, Never>?
     var thumbnailCacheRunning: Bool { thumbnailCacheTask != nil }
 
-    /// Walks the whole drive and generates a disk thumbnail for every photo/video that doesn't
+    /// Walks the whole drive and generates a disk thumbnail for every photo/video/PDF that doesn't
     /// have one yet (already-cached files are skipped — see `Thumbnailer.precache`). Runs as an
     /// app-wide activity pill so the user can keep browsing; the pill shows a fraction and the
     /// folder currently being worked through — deliberately no file counts. Stoppable from the
@@ -2343,11 +2343,24 @@ final class Library {
         setActivity(id, status: "Scanning drive…")
         let bg = BackgroundTaskHolder(); bg.begin(name: "Cache All Thumbnails")
         UIApplication.shared.isIdleTimerDisabled = true       // long run — keep the screen alive
+        // How many there are to do, from the drive index when it's built — what the pill's fraction is
+        // measured against. (The walk feeds the work as it goes, so it only knows the total at the very
+        // end: the pill used to spin with no fraction for the whole run and jump to 100% as it finished.)
+        let expected = index.reduce(into: 0) { n, e in
+            if e.kind == .image || e.kind == .video || e.kind == .pdf { n += 1 }
+        }
         thumbnailCacheTask = Task {
-            let cancelled = await Self.cacheAllThumbnails(under: root) { fraction, folder in
+            let outcome = await Self.cacheAllThumbnails(under: root, expected: expected) { fraction, folder in
                 Task { @MainActor in self.setActivity(id, status: folder, fraction: fraction) }
             }
-            endActivity(id, result: cancelled ? nil : "All thumbnails are cached.")
+            let result: String?
+            if outcome.cancelled { result = nil }
+            else if outcome.skipped == 0 { result = "All thumbnails are cached." }
+            else {
+                result = "Thumbnails are cached. \(outcome.skipped) file\(outcome.skipped == 1 ? " was" : "s were") "
+                    + "skipped — unreadable, or a kind with no preview."
+            }
+            endActivity(id, result: result)
             thumbnailCacheTask = nil
             UIApplication.shared.isIdleTimerDisabled = false
             bg.end()
@@ -2358,8 +2371,13 @@ final class Library {
         thumbnailCacheTask?.cancel()
     }
 
-    /// The worker: walk the drive and thumbnail as it goes, bounded-concurrent. Returns true if
-    /// the pass was cancelled.
+    /// The worker: walk the drive and thumbnail as it goes, bounded-concurrent. Returns whether the
+    /// pass was cancelled and how many files ended without a thumbnail.
+    ///
+    /// `expected` (the index's count, 0 when there's no index yet) gives the fraction something to be
+    /// measured against while the walk is still going; without it the fraction is -1 until the end.
+    /// Files that fail are tried once more at the end, one at a time — QuickLook drops requests when
+    /// many videos are asked for at once, and those are the ones that succeed alone.
     ///
     /// Discovery is INTERLEAVED with the thumbnail work — files feed the task group straight off
     /// the enumerator — so caching starts within seconds. (The first version scanned the whole
@@ -2374,12 +2392,12 @@ final class Library {
     /// function still runs on the *caller's* actor here, and the caller is the main actor — the
     /// synchronous drive walk froze the whole UI without it. A detached task doesn't inherit the
     /// caller's cancellation, so the Stop button's cancel is forwarded explicitly.
-    private nonisolated static func cacheAllThumbnails(under root: URL,
-                                                       progress: @escaping @Sendable (Double, String) -> Void) async -> Bool {
-        let worker = Task.detached(priority: .utility) { () -> Bool in
+    private nonisolated static func cacheAllThumbnails(under root: URL, expected: Int,
+                                                       progress: @escaping @Sendable (Double, String) -> Void) async -> (cancelled: Bool, skipped: Int) {
+        let worker = Task.detached(priority: .utility) { () -> (cancelled: Bool, skipped: Int) in
             let fm = FileManager.default
             guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey],
-                                             options: [.skipsHiddenFiles]) else { return Task.isCancelled }
+                                             options: [.skipsHiddenFiles]) else { return (Task.isCancelled, 0) }
             var kindByExt: [String: FileKind] = [:]
             func nextMedia() -> (url: URL, kind: FileKind)? {
                 while !Task.isCancelled, let url = walker.nextObject() as? URL {
@@ -2391,7 +2409,7 @@ final class Library {
                         kind = classify(url: url, isDirectory: false)
                         kindByExt[ext] = kind
                     }
-                    if kind == .image || kind == .video { return (url, kind) }
+                    if kind == .image || kind == .video || kind == .pdf { return (url, kind) }
                 }
                 return nil
             }
@@ -2399,32 +2417,56 @@ final class Library {
             var discovered = 0
             var scanDone = false
             var lastFolder = ""
-            await withTaskGroup(of: String.self) { group in
+            var failed: [(url: URL, kind: FileKind)] = []      // for the second try (capped)
+            var failedCount = 0
+            // The fraction shown: against the walk's own total once it has one, against the index's
+            // count before that (held just short of full — the index can be behind the drive), and
+            // none at all (-1, the spinner) when there's neither.
+            func fraction() -> Double {
+                if scanDone { return Double(done) / Double(max(discovered, 1)) }
+                guard expected > 0 else { return -1 }
+                return min(0.99, Double(done) / Double(max(expected, discovered)))
+            }
+            await withTaskGroup(of: (folder: String, url: URL, kind: FileKind, failed: Bool).self) { group in
                 let maxConcurrent = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8))
                 func addNext() {
                     guard !Task.isCancelled else { return }
                     guard let file = nextMedia() else { scanDone = true; return }
                     discovered += 1
                     group.addTask {
-                        guard !Task.isCancelled else { return "" }
-                        await Thumbnailer.shared.precache(fileAt: file.url, kind: file.kind)
-                        return file.url.deletingLastPathComponent().lastPathComponent
+                        guard !Task.isCancelled else { return ("", file.url, file.kind, false) }
+                        let outcome = await Thumbnailer.shared.precache(fileAt: file.url, kind: file.kind)
+                        return (file.url.deletingLastPathComponent().lastPathComponent, file.url, file.kind,
+                                outcome == .failed)
                     }
                 }
                 for _ in 0..<maxConcurrent { addNext() }
-                while let folder = await group.next() {
+                while let finished = await group.next() {
                     done += 1
+                    if finished.failed {
+                        failedCount += 1
+                        if failed.count < 3000 { failed.append((finished.url, finished.kind)) }
+                    }
+                    let folder = finished.folder
                     // Surface the folder currently being worked through (the walk is depth-first,
                     // so consecutive files share a folder) — promptly on a folder change, and on
                     // a steady cadence inside big folders. Still no file counts, by design.
                     if (!folder.isEmpty && folder != lastFolder) || done % 20 == 0 || (scanDone && done == discovered) {
                         if !folder.isEmpty { lastFolder = folder }
-                        progress(scanDone ? Double(done) / Double(max(discovered, 1)) : -1, lastFolder)
+                        progress(fraction(), lastFolder)
                     }
                     addNext()
                 }
             }
-            return Task.isCancelled
+            // The second try, one at a time.
+            if !failed.isEmpty, !Task.isCancelled {
+                progress(1, "Trying the ones that didn’t work again…")
+                for file in failed {
+                    if Task.isCancelled { break }
+                    if await Thumbnailer.shared.precache(fileAt: file.url, kind: file.kind) != .failed { failedCount -= 1 }
+                }
+            }
+            return (Task.isCancelled, max(0, failedCount))
         }
         return await withTaskCancellationHandler {
             await worker.value

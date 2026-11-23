@@ -2,6 +2,7 @@ import UIKit
 import ImageIO
 import CoreImage
 import QuickLookThumbnailing
+import AVFoundation
 import CryptoKit
 
 /// Generates thumbnails for photos, videos and PDFs, with a memory + disk cache and
@@ -133,8 +134,11 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
             task = existing
         } else {
             let kind = entry.kind
+            // A huge folder's listing doesn't stat its files (`Library.listing`: size 0, no date).
+            let statless = entry.size == 0 && entry.modified == .distantPast
             task = Task.detached(priority: .utility) { [weak self] in
-                await self?.produce(key: key, url: entry.url, kind: kind, size: size, scale: scale) ?? nil
+                await self?.produce(key: key, url: entry.url, kind: kind, size: size, scale: scale,
+                                    statless: statless) ?? nil
             }
             inFlight[key] = task
         }
@@ -145,9 +149,17 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         return image
     }
 
-    private func produce(key: String, url: URL, kind: FileKind, size: CGSize, scale: CGFloat) async -> UIImage? {
+    private func produce(key: String, url: URL, kind: FileKind, size: CGSize, scale: CGFloat,
+                         statless: Bool = false) async -> UIImage? {
         let nsKey = key as NSString
-        let diskURL = diskDir.appendingPathComponent(key).appendingPathExtension("jpg")
+        // An entry from a huge folder's listing carries no size or date, so `key` isn't the name the
+        // file's thumbnail is stored under by anything that did stat it — the Cache All Thumbnails pass
+        // above all, which is why those folders (the biggest ones) went on generating every tile after
+        // "All thumbnails are cached". The disk copy goes by the file's real date and size (one stat,
+        // here, off the main thread); the memory cache keeps the entry's key, which costs nothing.
+        let stamp = statless ? fileStamp(of: url) : nil
+        let diskKey = stamp?.key ?? key
+        let diskURL = diskDir.appendingPathComponent(diskKey).appendingPathExtension("jpg")
         let useDisk = diskCacheEnabled
         if useDisk, let data = try? Data(contentsOf: diskURL), let raw = UIImage(data: data) {
             if Self.isHDR(raw.cgImage) {
@@ -160,6 +172,22 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
                 let img = raw.preparingForDisplay() ?? raw
                 memory.setObject(img, forKey: nsKey, cost: cost(of: img))
                 return img
+            }
+        }
+        // A thumbnail this folder made before, under the entry's date-less key: taken over under the
+        // real one — if it was made after the file last changed (that key never noticed an edit).
+        if useDisk, let stamp, diskKey != key {
+            let old = diskDir.appendingPathComponent(key).appendingPathExtension("jpg")
+            if let made = (try? old.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
+                if made > stamp.modified, let data = try? Data(contentsOf: old), let raw = UIImage(data: data),
+                   !Self.isHDR(raw.cgImage) {
+                    do { try FileManager.default.moveItem(at: old, to: diskURL) }
+                    catch { try? data.write(to: diskURL, options: .atomic) }
+                    let img = raw.preparingForDisplay() ?? raw
+                    memory.setObject(img, forKey: nsKey, cost: cost(of: img))
+                    return img
+                }
+                try? FileManager.default.removeItem(at: old)       // older than the file, or unusable
             }
         }
         // Adopt a thumbnail generated under the pre–move-stable key (full path) instead of
@@ -224,7 +252,34 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
             // QuickLook can't poster WebM; WebKit draws a frame instead (one at a time, time-boxed).
             return await WebMPoster.poster(for: url, maxPixel: max(size.width, size.height) * scale)
         }
-        return await quickLook(url: url, size: size, scale: scale)   // videos, PDFs, and image fallback
+        if let img = await quickLook(url: url, size: size, scale: scale) { return img }   // videos, PDFs, and image fallback
+        // QuickLook gives up on some videos — and on more of them when many are asked for at once, as
+        // the whole-drive pass does. A frame straight from the file then, so the video isn't left
+        // without a tile (and isn't asked for again on every pass).
+        if kind == .video { return await videoFrame(url: url, maxPixel: max(size.width, size.height) * scale) }
+        return nil
+    }
+
+    /// A video's poster from AVFoundation (QuickLook's stand-in), time-boxed: a damaged file on an
+    /// external drive must not hold a lane of the pass for good.
+    private func videoFrame(url: URL, maxPixel: CGFloat) async -> UIImage? {
+        await withTaskGroup(of: UIImage?.self) { group in
+            group.addTask {
+                let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+                gen.appliesPreferredTrackTransform = true
+                gen.maximumSize = CGSize(width: maxPixel, height: maxPixel)
+                let time = CMTime(seconds: 0.5, preferredTimescale: 600)
+                guard let cg = try? await gen.image(at: time).image else { return nil }
+                return UIImage(cgImage: cg)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 12_000_000_000)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
     }
 
     /// Fast in-process photo thumbnail via ImageIO (honors EXIF orientation, decoded immediately).
@@ -268,6 +323,21 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         guard let rv = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else { return nil }
         let mtime = Int((rv.contentModificationDate ?? .distantPast).timeIntervalSince1970)
         return sha("\(url.thumbCacheID)|\(mtime)|\(rv.fileSize ?? 0)")
+    }
+
+    /// `cacheKey(forFileAt:)` together with the date it was computed from.
+    private func fileStamp(of url: URL) -> (key: String, modified: Date)? {
+        guard let rv = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else { return nil }
+        let modified = rv.contentModificationDate ?? .distantPast
+        return (sha("\(url.thumbCacheID)|\(Int(modified.timeIntervalSince1970))|\(rv.fileSize ?? 0)"), modified)
+    }
+
+    /// Whether a stored thumbnail can be used as it is: it opens, and it isn't one of the HDR-tagged
+    /// JPEGs `produce` throws away when it meets them. Reads the header only.
+    private static func storedIsUsable(_ url: URL) -> Bool {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return false }
+        return !isHDR(cg)
     }
 
     /// The pre–move-stable disk-cache key: the full drive-relative path (`stableCacheID`) with
@@ -323,21 +393,37 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
     /// cache: a whole-drive sweep must not evict the tiles the user is actually looking at.
     /// Generates at the largest size a grid tile can ask for (the key ignores size, so one
     /// stored thumbnail satisfies every future request).
-    func precache(fileAt url: URL, kind: FileKind) async {
-        guard diskCacheEnabled, let key = cacheKey(forFileAt: url) else { return }   // nothing to persist in Pure File Transfer
+    ///
+    /// The stored JPEG must be what `produce` would have stored — **standard range**. An HDR video's
+    /// poster (or an HDR photo ImageIO didn't tone-map) used to be written here as it came, HDR-tagged;
+    /// `produce` deletes exactly those when a tile asks for them and makes them again, so for every HDR
+    /// item the pass's work was thrown away the first time the folder was opened. A stored thumbnail of
+    /// that kind (from earlier passes) is replaced here too.
+    @discardableResult
+    func precache(fileAt url: URL, kind: FileKind) async -> Precached {
+        guard diskCacheEnabled else { return .already }       // nothing to persist in Pure File Transfer
+        guard let key = cacheKey(forFileAt: url) else { return .failed }
         let fm = FileManager.default
         let diskURL = diskDir.appendingPathComponent(key).appendingPathExtension("jpg")
-        if fm.fileExists(atPath: diskURL.path) { return }
-        if let legacy = legacyCacheKey(forFileAt: url) {
+        if fm.fileExists(atPath: diskURL.path) {
+            if Self.storedIsUsable(diskURL) { return .already }
+            try? fm.removeItem(at: diskURL)
+        } else if let legacy = legacyCacheKey(forFileAt: url) {
             let legacyURL = diskDir.appendingPathComponent(legacy).appendingPathExtension("jpg")
-            if fm.fileExists(atPath: legacyURL.path), (try? fm.moveItem(at: legacyURL, to: diskURL)) != nil { return }
+            if fm.fileExists(atPath: legacyURL.path), Self.storedIsUsable(legacyURL),
+               (try? fm.moveItem(at: legacyURL, to: diskURL)) != nil { return .already }
         }
         let side: CGFloat = 110                               // grid tile size, matching `prewarm`
-        guard let img = await generate(url: url, kind: kind, size: CGSize(width: side, height: side), scale: 3) else { return }
-        if let data = img.jpegData(compressionQuality: 0.8) {
-            try? data.write(to: diskURL, options: .atomic)
+        guard let made = await generate(url: url, kind: kind, size: CGSize(width: side, height: side), scale: 3) else {
+            return .failed
         }
+        guard let data = Self.standardRange(made).jpegData(compressionQuality: 0.8),
+              (try? data.write(to: diskURL, options: .atomic)) != nil else { return .failed }
+        return .made
     }
+
+    /// What `precache` did for one file.
+    enum Precached: Sendable { case already, made, failed }
 
     /// Pre-generates the disk-cache thumbnail for a file whose full-size bytes we already have
     /// in memory (e.g. a video frame the exporter just wrote), so the folder never has to decode

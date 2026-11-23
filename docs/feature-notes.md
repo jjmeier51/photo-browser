@@ -3449,6 +3449,38 @@ through, both ways:
 - Tested on the Mac side against a file shaped as the iPhone writes it (`fav_t/t.py`: folder and file hearts in,
   out, renamed, trashed + undone, moved, the unreadable moment). **The Swift is not compiled or run.**
 
+#### 6aw Cache All Thumbnails (iPhone): four things that were off (Nov 23, 2026)
+
+"Ensure that Cache All Thumbnails is working properly — something feels off." Read end to end
+(`Library.startThumbnailCaching` → `cacheAllThumbnails` → `Thumbnailer.precache`, against what a tile does:
+`thumbnail(for:)` → `produce`). What was wrong:
+
+1. **HDR items were cached, then thrown away.** `precache` wrote whatever `generate` returned; `produce` stores
+   `standardRange(made)` and *deletes* an HDR-tagged JPEG when it meets one on disk ("saved before thumbnails
+   were tone-mapped"). So every HDR video poster and un-tone-mapped HDR photo the pass made was deleted and made
+   again the first time its folder was opened. `precache` now stores the same standard-range JPEG, and replaces
+   a stored one of the old kind (`storedIsUsable`, header only) instead of counting it as done.
+2. **The biggest folders never used the pass's work.** A folder over 8,000 items is listed without a stat per
+   file (`Library.listing`: `size: 0, modified: .distantPast`), so a tile's key there —
+   `sha(id|distantPast|0)` — is never the key `precache` stores under (`sha(id|mtime|size)`). Those folders went
+   on generating every tile. `produce` now resolves the **disk** key from the file itself for such an entry
+   (`statless` → `fileStamp(of:)`, one stat, off-main; the memory key stays the entry's), and takes over a
+   thumbnail the folder made earlier under the date-less key when it's newer than the file (else drops it —
+   that key never noticed an edit).
+3. **The pill never showed progress.** Discovery is interleaved with the work, so "the walk finished" is only
+   true at the very end: the fraction was -1 (a spinner) for the whole run, then ~100%. The fraction is now
+   measured against the drive index's count (`expected`, held ≤ 0.99 until the walk's own total is known); with
+   no index yet it is the spinner as before. Still no file counts in the pill.
+4. **"All thumbnails are cached" when some weren't.** A file `generate` gave up on was skipped silently and
+   tried again on every later pass. Now: videos QuickLook refuses fall back to an `AVAssetImageGenerator` frame
+   (time-boxed, 12 s — in `generate`, so tiles get it too); files that still fail are tried once more at the end,
+   one at a time (QuickLook drops requests under load); and the result says how many were skipped, if any. PDFs
+   are cached too (tiles show them).
+
+Rules that follow: **`precache` must store exactly what `produce` would** (key, standard range, JPEG 0.8), and
+**an `Entry` with no size/date is not a key** — anything keyed `path|mtime|size` from a huge-folder entry must
+stat first. Not compiled or run here.
+
 ## 7. Downloaders (from the broader project + this session)
 
 > **Nov 15, 2026 — every downloader's plain requests go through `mac/net_fetch.py`** (length-checked, resumable,

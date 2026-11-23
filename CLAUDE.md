@@ -662,7 +662,11 @@ and check `isActivityCancelled` between items to offer Stop in the activities sh
   de-duplication, and QuickLook generation off the main thread. Disk cache key =
   SHA256 of `path|mtime|size`. The disk cache lives in Application Support (not
   Caches) on purpose: iOS auto-purges Caches under storage pressure, which was
-  making the whole library re-thumbnail itself a few times a day.
+  making the whole library re-thumbnail itself a few times a day. **Cache All Thumbnails**
+  (`Library.startThumbnailCaching` → `Thumbnailer.precache`) must store exactly what a tile's `produce`
+  would — same key, standard range (an HDR-tagged JPEG is deleted on sight) — and an `Entry` from a huge
+  folder's listing has no size/date, so `produce` takes the disk key from the file (`statless`);
+  `docs/feature-notes.md` §6aw.
 - `ViewerView.swift` — full-screen one-item-at-a-time viewer; swipes are handled
   inside each page (UIKit) for reliability over the zoom scroll view.
   `ZoomableImageView.swift` (photos) and `VideoPage.swift` (Photos-style player)
