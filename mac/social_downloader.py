@@ -50,9 +50,11 @@ import simpcity as sc  # noqa: E402
 import social  # noqa: E402
 import app_identity
 
-LANES = 8                     # files downloaded at once (from the sites' photo/video servers — Meta's CDN, not the
-                              # pages or the API, which are paced on their own; was 6)
-EXIF_SESSIONS = 3             # ExifTools writing dates/captions side by side (simpcity.ExifPool)
+LANES = 12                    # files downloaded at once (from the sites' photo/video servers — Meta's CDN, not the
+                              # pages or the API, which are paced on their own; was 6, then 8 — the iPhone runs 16)
+EXIF_SESSIONS = 4             # ExifTools writing dates/captions side by side (simpcity.ExifPool; was 3)
+SETTLE_TICKS, SETTLE_MS = 3, 800    # a page opened (not scrolled) has drawn after this many quiet looks, this far
+                                    # apart: 2.4 s (was 4 × 1 s) — the page is only watched here, nothing is asked
 SAVE_EVERY = 300              # the record is saved (and the files tagged) after this many files…
 SAVE_SECONDS = 90             # …or this long after the last save, whichever comes first (each save writes the whole
                               # drive's tag table and the record — every 25 files, that alone stalled long runs)
@@ -848,10 +850,10 @@ class SocialWindow(QMainWindow):
                 return
             if not scroll:
                 state["idle"] += 1
-                if state["idle"] >= 4:                       # ~4 s with nothing new: the page has drawn
+                if state["idle"] >= SETTLE_TICKS:            # ~2.4 s with nothing new: the page has drawn
                     finish()
                     return
-                QTimer.singleShot(1000, tick)
+                QTimer.singleShot(SETTLE_MS, tick)
                 return
             page.runJavaScript(fanfix.scroll_js(1), 0, scrolled)
 

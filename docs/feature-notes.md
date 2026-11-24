@@ -4403,6 +4403,26 @@ weeks; `t_box.py` — the box, its hold on "Only exclusive", the option reaching
 `fb2/t_hub.py`, `t_win.py`, `t_visit.py` still pass. **Not run against facebook.com** — which of the above was
 the break on the real profile isn't known; if a run still stops, the log (`facebook-downloads.log`) has the line.
 
+### 7.4h-5 Instagram and Facebook on the Mac, a little faster (Nov 24, 2026)
+
+"Speed up the Instagram and Facebook downloaders slightly." Within the standing rule — **Meta's counted requests
+are never made faster than their limits** — so nothing here raises a ceiling or shortens the gap between API calls
+or page reads:
+
+- **Downloads wider**: `LANES` 8 → 12 (the files come from Meta's CDN, not the pages or the API; the iPhone runs
+  16). This is where both downloaders spend most of a run.
+- **Dates and captions written wider**: `EXIF_SESSIONS` 3 → 4 (`simpcity.ExifPool`).
+- **Facebook earns its faster pace sooner**: `EASED_AFTER` 120 → 90 quick answers in a row per step. The pace
+  still starts at `PER_MINUTE` (50), still tops out at `FAST_PER_MINUTE` (75), and is still cut at the first slow
+  answer or refusal — it just gets from 50 to 75 in about 450 good reads instead of 600.
+- **A page that's only opened is given up on waiting for sooner**: a visit without scrolling (a profile's front
+  page, a first look at a guessed hub address) counts as drawn after 3 quiet looks 0.8 s apart (2.4 s; was 4 × 1 s
+  — `SETTLE_TICKS`, `SETTLE_MS`). Nothing is asked during that wait; it only watched.
+
+Left alone on purpose: Instagram's `GAP` between API calls, the scroll step (1.3 s — scrolling is what makes the
+page itself ask for more), `KNOWN_RUN` / `SEEN_RUN` (how many already-downloaded posts in a row end a walk: fewer
+would be faster and could miss a post). Not measured against the real sites.
+
 ### 7.4i Google Drive in Photo Browser for Mac — `mac/gdrive.py`, `mac/gdrive_window.py` (Nov 20, 2026)
 
 **Asked for:** "similar to the iOS app, add a Google Drive downloader… one or more files or complete folders… It
