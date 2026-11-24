@@ -93,6 +93,7 @@ import themes
 import ui_extras
 import thumb_color
 import thumb_cache_window
+import live_photo
 import capcut
 import media_info
 import metadata_edit
@@ -1002,9 +1003,48 @@ TO_DELETE_TAG = "to-delete"          # "To Delete" (beside Favorite) is this tag
 TO_DELETE_RED = "#FF453A"
 
 
+LIVE: "live_photo.Index | None" = None           # which photos are Live Photos, a folder at a time (live_photo.py)
+
+
+def live_index() -> "live_photo.Index":
+    global LIVE
+    if LIVE is None:
+        try:
+            import facts_store
+            LIVE = live_photo.Index(facts_store.default())
+        except Exception:  # noqa: BLE001 — nothing kept between launches, then
+            LIVE = live_photo.Index()
+    return LIVE
+
+
+def live_motion_of(path: str) -> str:
+    """The photo's Live Photo movie ("" — it isn't one): from what's known of its folder, else read now (two
+    small reads: the photo's Exif and the movie's index)."""
+    ix = live_index()
+    movie = ix.motion(path)
+    if movie or ix.known(os.path.dirname(path)):
+        return movie
+    return live_photo.motion_for(path)
+
+
+def with_live_movies(paths: list[str]) -> list[str]:
+    """`paths`, and — for each Live Photo among them — its movie: it isn't listed, and goes where its photo goes
+    (to the Trash, to another folder or drive)."""
+    out, have = list(paths), set(paths)
+    for p in paths:
+        movie = live_motion_of(p) if live_photo.is_image(p) else ""
+        if movie and movie not in have and os.path.isfile(movie):
+            out.append(movie)
+            have.add(movie)
+    return out
+
+
 def marks_of(path: str) -> list[str]:
-    """What a tile shows in its corner: the labels, and "to-delete" when the item carries that tag."""
+    """What a tile shows in its corner: the labels, "live" for a Live Photo, and "to-delete" when the item
+    carries that tag."""
     out = list(labels_of(path))
+    if LIVE is not None and LIVE.motion(path):
+        out.append("live")
     if any(t.casefold() == TO_DELETE_TAG for t in tag_store().tags(path, fresh=False)):
         out.append(TO_DELETE_TAG)
     return out
@@ -1020,7 +1060,7 @@ def draw_labels(p: QPainter, labels: list[str], rect: QRectF, corner: str = "top
         return
     d = max(13.0, min(20.0, rect.width() / 7))
     gap = 3.0
-    marks = [x for x in ("favorite", TO_DELETE_TAG, "ai") if x in labels]
+    marks = [x for x in ("live", "favorite", TO_DELETE_TAG, "ai") if x in labels]
     total = len(marks) * d + (len(marks) - 1) * gap
     right = corner.endswith("right")
     x = rect.right() - 5 - total - nudge if right else rect.x() + 5 + nudge
@@ -1031,7 +1071,14 @@ def draw_labels(p: QPainter, labels: list[str], rect: QRectF, corner: str = "top
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(0, 0, 0, 120))
         p.drawEllipse(box)
-        if mark == "favorite":
+        if mark == "live":                                 # a Live Photo: the ring and dot
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor("white"), max(1.2, d * 0.09)))
+            p.drawEllipse(box.center(), d * 0.3, d * 0.3)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("white"))
+            p.drawEllipse(box.center(), d * 0.12, d * 0.12)
+        elif mark == "favorite":
             p.setBrush(QColor("white"))
             p.drawPath(heart_path(box.adjusted(d * 0.22, d * 0.26, -d * 0.22, -d * 0.22)))
         elif mark == TO_DELETE_TAG:                        # a red disc with a white bin
@@ -3946,6 +3993,7 @@ class PaneModel(QSortFilterProxyModel):
         self.label_of: Callable[[str, int, int], str | None] | None = None   # (path, mtime, size) → label
         self.root_path = ""                          # the folder listed — only its own rows are filtered
         self.videos_first = False                    # this folder's "Videos at the Top" (folder_options.py)
+        self.hide_motion = True                      # a Live Photo's movie isn't listed beside its photo
         self.setDynamicSortFilter(True)
         # Sizes come in one folder at a time: the order (by size) and the size filter catch up a few
         # times a second, not once per folder — a full re-sort per folder was quadratic in a big listing.
@@ -3966,6 +4014,10 @@ class PaneModel(QSortFilterProxyModel):
         return bool(self.size_filter is not None or self.type_filter or self.format_exts or self.place is not None)
 
     def filterAcceptsRow(self, row: int, parent: QModelIndex) -> bool:  # noqa: N802
+        if self.hide_motion and LIVE is not None and LIVE.any():
+            model = self.sourceModel()
+            if LIVE.is_motion(model.filePath(model.index(row, 0, parent))):
+                return False                         # the Live Photo is its photo's tile (View ▸ Show Live Photo Videos)
         if not self.filtering():
             return True
         src = self.sourceModel()
@@ -4024,6 +4076,9 @@ class PaneModel(QSortFilterProxyModel):
             if index.column() == 0 and role == Qt.ItemDataRole.ToolTipRole:
                 return self._tip(self.filePath(index), self.isDir(index),
                                  None if self.isDir(index) else self.sourceModel().size(self.mapToSource(index)))
+            if index.column() == 2 and role == Qt.ItemDataRole.DisplayRole and LIVE is not None \
+                    and LIVE.motion(self.filePath(index)):
+                return "Live Photo"                        # (the list has no tile to carry the LIVE mark)
         return super().data(index, role)
 
     def headerData(self, section: int, orientation, role: int = Qt.ItemDataRole.DisplayRole):  # noqa: N802
@@ -4232,6 +4287,8 @@ class Pane(QWidget):
     selection_changed = Signal()
     airdrop_note = Signal(str)           # lines from the AirDrop thread → the status line
     _bubbles_found = Signal(str, object, object)   # (folder, highlights.Listing, {path: mtime}) from its reading thread
+    _live_found = Signal(str, bool)                # (folder, anything new) — its Live Photos were read (live_photo.Index)
+    _live_done = Signal(object, str)               # (live_photo.Made or None, why not) — Make Live Photo finished
 
     def __init__(self, role: str, settings: QSettings, views: FolderViews | None = None) -> None:
         super().__init__()
@@ -4470,6 +4527,13 @@ class Pane(QWidget):
         self._bubbles_soon.setInterval(600)
         self._bubbles_soon.timeout.connect(self._load_bubbles)
         self.fs.directoryLoaded.connect(lambda p: self._bubbles_soon.start() if p == self.location else None)
+        self._live_found.connect(self._live_looked, Qt.ConnectionType.QueuedConnection)
+        self._live_done.connect(self._live_finished, Qt.ConnectionType.QueuedConnection)
+        self._live_soon = QTimer(self)                     # the folder's Live Photos, read once it has listed
+        self._live_soon.setSingleShot(True)
+        self._live_soon.setInterval(300)
+        self._live_soon.timeout.connect(self._load_live)
+        self.fs.directoryLoaded.connect(lambda p: self._live_soon.start() if p == self.location else None)
         self.review_files = False                          # a Reviews folder's ordinary listing shown too
         root.addWidget(self.bubbles)
         self.stack = QStackedWidget()
@@ -5911,7 +5975,7 @@ class Pane(QWidget):
             set_to_delete=lambda p, on: self.set_to_delete([p], on, quiet=True),
             age_of=self._age_of,
             set_cover=self.cover_from_viewer, edit_photo=self.edit_photo,
-            edit_with_ai=self.ai_edit, shown=self._follow_viewer,
+            edit_with_ai=self.ai_edit, shown=self._follow_viewer, live_motion=live_motion_of,
             extra={"frame_note": frame_export.engine_note})
         # Opens over Photo Browser for Mac's window, as tall as its display, and takes each item's shape within that.
         viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None, box=self.window().geometry())
@@ -6110,6 +6174,7 @@ class Pane(QWidget):
         box.exec()
         if box.clickedButton() is not go:
             return False
+        paths = with_live_movies(paths)                   # a Live Photo's movie goes with its photo
         said = self._said_about(paths)
         went = [(p, MainWindow.trash_to(Path(p))) for p in paths]
         moved = [p for p, there in went if there is not None]
@@ -6653,6 +6718,181 @@ class Pane(QWidget):
         self.bubbles.hide()
         self.stack.show()
 
+    # -- Live Photos (live_photo.py): a photo and its movie are one item
+    def _load_live(self) -> None:
+        """Which photos here are Live Photos — read on a thread when the folder has changed since it was last
+        looked through; the listing then drops their movies and the tiles get their LIVE mark (`_live_looked`)."""
+        path = self.location
+        if not path or self.is_virtual or not os.path.isdir(path):
+            return
+        ix = live_index()
+        if ix.known(path):
+            return
+        found = self._live_found
+
+        def work() -> None:
+            try:
+                changed = ix.scan(path)
+            except Exception:  # noqa: BLE001 — unread: its photos are plain photos
+                changed = False
+            try:
+                found.emit(path, changed)
+            except RuntimeError:
+                pass
+        threading.Thread(target=work, daemon=True, name="live-photos").start()
+
+    def _live_looked(self, path: str, changed: bool) -> None:
+        if not changed:
+            return
+        for w in QApplication.topLevelWidgets():
+            for pane in w.findChildren(Pane):
+                if pane.location == path:
+                    pane.model.invalidate()
+                    pane.grid.viewport().update()
+                    pane.list.viewport().update()
+                    pane._status_soon.start()
+
+    @staticmethod
+    def live_pair(paths: list[str]) -> tuple[str, str] | None:
+        """(photo, video) when exactly one photo and one video are selected — what Make Live Photo takes."""
+        if len(paths) != 2 or any(os.path.isdir(p) for p in paths):
+            return None
+        image = next((p for p in paths if live_photo.is_image(p)), None)
+        video = next((p for p in paths if kind_of(p) == "video"), None)
+        return (image, video) if image and video and not live_motion_of(image) else None
+
+    def make_live_photo(self, image: str, video: str) -> None:
+        """Select a photo and a video ▸ Make Live Photo: the video becomes the photo's movie (it takes the photo's
+        name; the video as it was is kept, hidden, beside it — live_photo.make). Off the window's thread: on a
+        drive that can't clone, a long video is a real copy."""
+        import edit_undo
+        self.note(f"Making a Live Photo of “{os.path.basename(image)}”…")
+        done = self._live_done
+
+        def work() -> None:
+            try:
+                made = live_photo.make(image, video, write_image=lambda path, data: batch_crop.write_in_place(
+                    path, data, label="Make Live Photo"))
+                why = ""
+            except live_photo.LiveError as e:
+                made, why = None, str(e)
+            except Exception as e:  # noqa: BLE001
+                made, why = None, f"{type(e).__name__}: {e}"
+            try:
+                done.emit(made, why)
+            except RuntimeError:
+                pass
+        threading.Thread(target=edit_undo.batched(work), daemon=True, name="live-make").start()
+
+    def _live_finished(self, made, why: str) -> None:
+        if made is None:
+            QMessageBox.warning(self.window(), "Make Live Photo", why or "The Live Photo couldn't be made.")
+            return
+        self.live_made([made])
+
+    def live_made(self, mades: list) -> None:
+        """Live Photos were made (here, or in Find Live Photos): each video's tags and labels go to its photo, the
+        folders are looked through again, and it's said — with Undo, which takes them apart again."""
+        store = tag_store()
+        for m in mades:
+            try:
+                pairs = [(m.was_video, m.image)]
+                store.carry(pairs)
+                store.carry_labels(pairs)
+                store.forget([m.was_video])
+            except OSError:
+                pass
+        folders = {os.path.dirname(m.image) for m in mades} | {os.path.dirname(m.was_video) for m in mades}
+        self._live_refresh(folders)
+        n = len(mades)
+        line = (f"“{os.path.basename(mades[0].image)}” is a Live Photo now." if n == 1 else f"Made {n:,} Live Photos.") \
+            + " The video as it was is kept, hidden, beside it." * (n == 1) \
+            + " The videos as they were are kept, hidden, beside them." * (n != 1)
+
+        def undo() -> str:
+            back = 0
+            for m in mades:
+                try:
+                    live_photo.separate(m.image)
+                    back += 1
+                except live_photo.LiveError:
+                    pass
+            self._live_refresh(folders)
+            return f"{back:,} Live Photo{'s' if back != 1 else ''} taken apart again — the video{'s are' if back != 1 else ' is'} back."
+        self._undoable("Make Live Photo" if n == 1 else f"Make {n:,} Live Photos", undo, line)
+
+    def _live_refresh(self, folders) -> None:
+        ix = live_index()
+        for f in folders:
+            ix.forget(f)
+        search_query.NAMES.forget()
+        tags_changed()
+        for w in QApplication.topLevelWidgets():
+            for pane in w.findChildren(Pane):
+                pane._live_soon.start()
+                pane.refresh_results()
+
+    def separate_live(self, images: list[str]) -> None:
+        """Separate Live Photo: the photo and its video are two items again (the video as it was comes back from
+        the hidden folder — live_photo.separate)."""
+        done, said, failed = 0, "", []
+        for image in images:
+            try:
+                _back, said = live_photo.separate(image)
+                done += 1
+            except live_photo.LiveError as e:
+                failed.append(str(e))
+        self._live_refresh({os.path.dirname(i) for i in images})
+        if failed and not done:
+            QMessageBox.warning(self.window(), "Separate Live Photo", failed[0])
+        elif done:
+            self.note((said if done == 1 else f"{done:,} Live Photos taken apart — their videos are back.")
+                      + (f" {len(failed):,} couldn't be." if failed else ""))
+
+    def find_live_photos(self, folder: str) -> None:
+        """Right-click a folder ▸ Find Live Photos…: its photo + video pairs that share a name, side by side, to
+        tick and make into Live Photos together (live_window.py)."""
+        import edit_undo
+        import live_window
+
+        def thumb(p: str) -> QPixmap | None:
+            try:
+                return THUMBS.get(p, os.stat(p).st_mtime) if THUMBS is not None else None
+            except OSError:
+                return None
+        hooks = live_window.LiveHooks(
+            thumb=thumb, thumbs_ready=THUMBS.ready if THUMBS is not None else None,
+            write_image=lambda path, data: batch_crop.write_in_place(path, data, label="Make Live Photo"),
+            batched=edit_undo.batched, made=self.live_made,
+            view=lambda paths, start: self.view_media(start, among=paths))
+        win = live_window.LiveFindWindow(folder, hooks, self.window())
+        win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        _VIEWERS.append(win)
+        win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
+        win.show()
+
+    def _live_follow(self, res) -> None:
+        """A Live Photo was renamed: its movie takes the new name too — it isn't listed, and the pair is by name."""
+        import rename_tools
+        ix = live_index()
+        plan = []
+        for r in res.done:
+            movie = "" if r.is_dir else ix.motion(r.old)
+            if not movie or not os.path.isfile(movie) or os.path.dirname(r.new) != os.path.dirname(movie):
+                continue
+            target = os.path.join(os.path.dirname(movie),
+                                  os.path.splitext(os.path.basename(r.new))[0] + os.path.splitext(movie)[1])
+            if target != movie and not os.path.lexists(target):
+                plan.append((r, rename_tools.Rename(movie, target, False)))
+        if not plan:
+            return
+        got = rename_tools.apply([x for _r, x in plan], tag_store())
+        went = {x.old: x.new for x in got.done}
+        for r, x in plan:
+            if x.old in went:
+                ix.moved(r.old, r.new, went[x.old])
+                live_photo.movie_renamed(x.old, went[x.old])
+
     def _load_bubbles(self) -> None:
         """Which of this folder's folders are highlights — read on a thread (it looks into each for a profile's
         record, and may read the iPhone's backup), shown by `_show_bubbles`."""
@@ -6860,8 +7100,8 @@ class Pane(QWidget):
 
     def delete_selection(self) -> None:
         """Move the selected files and folders to the Trash (recoverable), after a confirmation —
-        in a folder listing, search results, All Videos or Empty Folders alike."""
-        paths = self.selected_paths()
+        in a folder listing, search results, All Videos or Empty Folders alike. A Live Photo's movie goes with it."""
+        paths = with_live_movies(self.selected_paths())
         if not paths:
             return
         search_query.NAMES.forget()
@@ -6925,6 +7165,7 @@ class Pane(QWidget):
     def _names_changed(self, res) -> None:
         """After renames: the caches keyed by the old names go, the views follow, tags repaint."""
         old = [r.old for r in res.done]
+        self._live_follow(res)
         search_query.NAMES.forget()
         media_info.forget(old)
         _people_do(lambda store: store.renamed([(r.old, r.new) for r in res.done]))
@@ -7256,6 +7497,13 @@ class Pane(QWidget):
                                lambda: self.upscale_videos(videos))
         if 2 <= len(photos) <= 9:
             menu.addAction(f"Make Collage of {len(photos)} Photos…", lambda: self.make_collage(photos))
+        pair = self.live_pair(paths)
+        if pair is not None:
+            menu.addAction("Make Live Photo", lambda: self.make_live_photo(*pair))
+        lives = [p for p in paths if LIVE is not None and LIVE.motion(p)]
+        if lives:
+            menu.addAction("Separate Live Photo" if len(lives) == 1 else f"Separate {len(lives)} Live Photos",
+                           lambda: self.separate_live(lives))
         if photos:
             menu.addAction("Edit with AI…" if len(photos) == 1 else f"Edit {len(photos)} Photos with AI…",
                            lambda: self.ai_edit(photos))
@@ -7315,6 +7563,8 @@ class Pane(QWidget):
                        lambda: self.find_duplicates(folder))
         menu.addAction("Cache Thumbnails Here…" if here else "Cache Thumbnails…",
                        lambda: self.cache_thumbnails(folder))
+        menu.addAction("Find Live Photos Here…" if here else "Find Live Photos…",
+                       lambda: self.find_live_photos(folder))
         menu.addAction("Rename Files Here…" if here else "Rename Files Inside…", lambda: self.rename_many([folder]))
         menu.addAction("Remove Leading Spaces from Names Here…" if here else "Remove Leading Spaces from Names…",
                        lambda: self.remove_leading_spaces(folder))
@@ -9068,6 +9318,7 @@ class MainWindow(QMainWindow):
         self._edits.timeout.connect(self._collect_edits)
         self._edits.start()
         self.show_hidden = str(self.settings.value("showHidden", "false")) == "true"
+        self.show_live_videos = str(self.settings.value("live/showVideos", "false")) == "true"
         self.resize(1320, 820)
         self.setMinimumSize(860, 600)
         self.queue: list[tuple[engine.Plan, bool, bool, str]] = []
@@ -9089,6 +9340,7 @@ class MainWindow(QMainWindow):
             pane.activated.connect(self.set_active)
             if self.show_hidden:
                 pane.set_hidden(True)
+            pane.model.hide_motion = not self.show_live_videos
             pane.dropped.connect(lambda paths, dest: self.confirm_transfer(
                 paths, dest, self.settings.value("move", "true") == "true"))
             pane.location_changed.connect(lambda _p, pane=pane: self._location_changed(pane))
@@ -9427,6 +9679,16 @@ class MainWindow(QMainWindow):
         dlg.finished.connect(dlg.deleteLater)
         dlg.open()
 
+    def set_show_live_videos(self, on: bool) -> None:
+        """View ▸ Show Live Photo Videos: a Live Photo's movie listed beside its photo, or (as it comes) not."""
+        self.show_live_videos = bool(on)
+        self.settings.setValue("live/showVideos", "true" if on else "false")
+        for pane in (self.src, self.dst):
+            pane.model.hide_motion = not on
+            pane.model.invalidate()
+        self.active_pane.note("Live Photos' videos are listed beside their photos." if on
+                              else "Live Photos are one item again.")
+
     def set_show_hidden(self, on: bool) -> None:
         self.show_hidden = bool(on)
         self.settings.setValue("showHidden", "true" if on else "false")
@@ -9486,7 +9748,7 @@ class MainWindow(QMainWindow):
             self.src.note(f"Choose where they go in the pane on the right, then press {'Move' if move else 'Copy'} "
                           "again.")
             return
-        paths = self.src.selected_paths()
+        paths = with_live_movies(self.src.selected_paths())      # a Live Photo travels whole
         if paths and self.dest:
             self.confirm_transfer(paths, self.dest, move)
 

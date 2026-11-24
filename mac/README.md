@@ -420,6 +420,44 @@ too (`facts.sqlite` in the same folder), so folders don't have to be looked thro
 Export All Frames makes each frame's thumbnail while the export is still running, so the frames folder opens with
 every thumbnail ready; the window says "Thumbnails ready." when the last one is made.
 
+### Live Photos — make them, play them, find them (`live_photo.py`, `live_window.py`)
+
+A Live Photo is a photo with a couple of seconds of video behind it. On the drive it's what an iPhone makes: the
+photo and a movie **side by side with the same name** (`IMG_1234.HEIC` + `IMG_1234.MOV`), each carrying the same
+hidden identifier. Photo Browser for Mac treats such a pair as **one item**:
+
+- **In a folder** you see the photo, with the Live Photo mark (the ring and dot) on its tile — "Live Photo" under
+  Kind in the list. Its movie isn't listed separately (View ▸ **Show Live Photo Videos** lists it too).
+- **In the viewer** a **◉ LIVE** button appears. Rest the pointer on it and the Live Photo plays, as in Photos on
+  the Mac; **press and hold the photo** and it plays for as long as you hold, as on the iPhone; click LIVE or
+  press **Space** to play it once through.
+- Rename a Live Photo and its movie is renamed with it; move, copy or trash it and the movie goes along.
+
+Live Photos exported from an iPhone are recognised by themselves — nothing to do.
+
+**Make a Live Photo** — select **one photo and one video**, right-click ▸ **Make Live Photo** (or Photos ▸ Live
+Photo ▸ Make Live Photo). The video becomes the photo's movie: it takes the photo's name (`beach.jpg` +
+`holiday clip.mp4` → `beach.jpg` + `beach.mov`) and both get the identifier. Nothing is re-encoded — the movie is
+the video, byte for byte, with the identifier added. **Nothing is deleted**: the video as it was is put in a hidden
+folder beside the photo, `.Live Photo Originals`. The photo isn't copied — it's the same picture with one line of
+metadata added. Undo (⌘Z) takes the Live Photo apart again.
+
+**Find Live Photos** — right-click a folder ▸ **Find Live Photos…** (or Photos ▸ Live Photo ▸ Find Live Photos…).
+It lists every photo and video in the folder that share a name — `IMG_1234.jpeg` + `IMG_1234.mov` — and aren't a
+Live Photo yet, **each pair as two pictures side by side** (the photo, and the video's picture with its length), so
+you can see whether they're the same moment. Pairs that look right come ticked; ones that don't — a long video, or
+two files dated days apart, as in a downloaded gallery's `001.jpg` + `001.mp4` — come unticked with the reason
+underneath. Double-click a picture to open it. Tick what you want and press **Make N Live Photos**; "Look in the
+folders inside it too" covers a whole album tree. Pairs that are Live Photos already are counted, not listed.
+
+**Separate Live Photo** (right-click a Live Photo) makes it a photo and a video again — the video as it was comes
+back from the hidden folder, to where it was.
+
+Good to know: the movie must be a QuickTime or MP4 file (`.mov`, `.mp4`, `.m4v`); convert anything else to MP4
+first. A Live Photo made here plays in Photo Browser on the iPhone too (touch and hold). For photos whose
+metadata can't hold the identifier (a PNG; an HEIC on a Mac without Xcode's Command Line Tools) it's kept in an
+attribute on the file instead — that pair is a Live Photo on the Mac, but not on the iPhone.
+
 ### Cache All Thumbnails
 
 Every thumbnail the app makes is kept on the Mac (above), so a folder you've looked at once opens with its

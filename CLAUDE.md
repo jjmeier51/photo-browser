@@ -507,6 +507,18 @@ written through `simpcity.ExifPool`, saves every 60 s — §7.4b-3. (`SimpCitySe
   (falls back to the phone's `metadata.json` backup), right-click a folder ▸ Set Birthday…, viewer Info ▸ Age,
   Go ▸ Folder Birthdays…; renames carry them. **Any new birthday setter on the iPhone must stamp
   `birthdayStamps`.** §6ap.
+- **Live Photos on the Mac** (`mac/live_photo.py`, `mac/live_window.py`, `mac/live_helper.swift`; §6ax) — the
+  iPhone's arrangement (`FileActions.makeLivePhoto`): a still + a same-named `.mov` with **matching identifiers**
+  (maker note 0x0011 / `com.apple.quicktime.content.identifier`); names alone never make a pair. Such a pair is
+  **one item**: the movie isn't listed (`PaneModel.hide_motion`, `LIVE` = `live_photo.Index`; View ▸ Show Live Photo
+  Videos), the tile is marked, the viewer plays it (◉ LIVE: rest on it, **press and hold the photo**, or Space —
+  `MediaViewer._live_tick` polls the mouse). **Make Live Photo** (one photo + one video selected) writes
+  `<photo>.mov` = the video's bytes + identifier + still-image-time track (`write_video`: old `moov` → `free`, new
+  one appended — pure Python, nothing re-encoded) and the photo's identifier (ImageIO helper → lossless JPEG splice
+  → ExifTool → an xattr); **the video as it was is kept in the hidden `.Live Photo Originals`** (`kept.json`),
+  never deleted; `separate` puts it back. **Find Live Photos…** (a folder): same-named pairs side by side, ticked
+  when likely, made in bulk. Whatever moves, renames or trashes a photo must take its movie along
+  (`with_live_movies`, `Pane._live_follow`).
 - **Google Drive in Photo Browser for Mac** — right-click a folder ▸ Download ▸ Download from Google Drive…
   (`mac/gdrive.py`, `mac/gdrive_window.py`): files and whole folders ticked in a tree of the person's Drive (My
   Drive / Shared with me / Starred / Shared drives / search) or pasted as links, into that folder with the tree

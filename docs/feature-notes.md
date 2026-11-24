@@ -1869,6 +1869,81 @@ without links or outline (leaders with 4 front-matter pages; no leaders with 6; 
 title), the viewer (real mouse clicks on numbers and titles at fit-width and zoomed, Back, the list, the menu,
 chapter steps, the page box) and the window's whole pictures flow.
 
+## 6ax. Live Photos on the Mac — `mac/live_photo.py`, `mac/live_window.py`, `mac/live_helper.swift`, `mac/media_viewer.py` (Nov 24, 2026)
+
+**Asked for:** make Live Photos in the Mac app from a selected photo + video; play them in the viewer "similar to
+how iOS Photos does it"; a **Find Live Photos** for an album that pairs same-named files (`IMG_1234.jpeg` +
+`IMG_1234.mov`), shows both thumbnails before anything is made, and makes them in bulk; and "when the Live Photo
+is created, hide, don't delete, the previously separate photo and video."
+
+**What a Live Photo is here: the iPhone app's (and Apple's) arrangement, unchanged.** A still and a movie side by
+side with the same base name, with the same identifier in each — the still's Apple maker note tag 0x0011
+(ImageIO's `{MakerApple}` "17"), the movie's `com.apple.quicktime.content.identifier` — and, in the movie, a
+`com.apple.quicktime.still-image-time` timed-metadata track. The iPhone app already makes these
+(`FileActions.makeLivePhoto`) and plays only pairs whose identifiers agree (`ZoomableImageView.findLivePair`); the
+Mac now does the same, so a pair made on either plays on both, and a pair exported from an iPhone is a Live Photo
+on the Mac with nothing done to it. **The identifiers decide, never the names alone** (galleries are full of
+`001.jpg` + `001.mp4`).
+
+**Reading** (`image_id`, `video_id`) opens only what holds the answer: a JPEG's APP1, a PNG's `eXIf`, an HEIC's
+Exif item found through `meta` → `iinf` / `iloc` (not a scan of the file), a movie's `moov` (top-level atom
+headers, then that one atom). `Index` keeps a folder's pairs while the folder's modified time stands, and each
+pair's answer in `facts.sqlite` (kind "live", keyed by both files' times) — a folder of thousands isn't read
+through on every visit. Paths are compared in NFC.
+
+**Writing the movie — pure Python, nothing re-encoded, nothing moved** (`write_video`). The new file is the video's
+bytes exactly; the old `moov` stays where it is with its type changed to `free` (so no chunk offset anywhere
+changes), and after everything come a 17-byte `mdat` holding the track's one sample and the new `moov`: the old
+one with `mvhd`'s next-track number raised, a `trak` (handler `meta`, sample entry `mebx` with one key
+`mdta`/still-image-time of type 65 — a signed 8-bit number — one sample `[9][1][0]` spanning the movie), and
+`moov/meta` with the identifier (QuickTime form: `hdlr` mdta, `keys`, `ilst`; an existing one is merged into, in
+the form it has — with or without the 4 version bytes). Checked here with ExifTool (`[Keys] ContentIdentifier`,
+`[Track3] StillImageTime`) and ffprobe (same frames; an md5 of the copied streams is identical; one `mebx` data
+stream). **Not checked: that Apple's Photos imports the pair as a Live Photo** — the iPhone app's own files are
+made by AVAssetWriter, and this writes the same atoms by hand; if Photos is ever picky, `_still_track` is where.
+
+**Writing the photo's identifier** (`make` → `_image_bytes_with_id`), in order: it already has one (an iPhone
+photo taken with Live on) → used, the photo untouched; `live_helper.swift` (ImageIO, the iPhone's
+`writeAssetIdentifier` — built once with swiftc; **never compiled yet**); a JPEG → `jpeg_with_id`, a lossless
+splice: the Exif block gets a new maker note at its end and the two directories that point to it are written
+again there (`_tiff_with_note`), every other byte of the block and all of the picture left as they are — another
+camera's maker note is never replaced; ExifTool (adds to an Apple maker note that exists); else the identifier
+goes into an extended attribute on the photo (`XATTR`, not on exFAT), which `image_id` reads — a Live Photo on
+the Mac only. The attribute is set beside a maker-note write too, so undoing the photo's edit (it goes through
+`batch_crop.write_in_place`, label "Make Live Photo") doesn't break the pair.
+
+**"Hide, don't delete."** The Live Photo's movie is a new file, `<photo's name>.mov`. The video as it was is moved
+into `.Live Photo Originals` beside the photo (hidden in both apps and Finder; `kept.json` there notes which
+movie it's for and where it was) — on APFS the new movie is a clone of it, so the two cost the space of one.
+`separate` deletes the Live movie and moves the original back to where it was. The photo isn't copied: its
+pixels are untouched and the one added line of metadata is undoable. In listings the pair is **one item**:
+`PaneModel.filterAcceptsRow` drops a movie the index knows as a Live Photo's (`hide_motion`; View ▸ Show Live
+Photo Videos), the tile gets the "live" mark (`marks_of` / `draw_labels`), the list's Kind says "Live Photo".
+What's done to the photo is done to its movie: Trash and transfers take it along (`with_live_movies`), a rename
+renames it (`Pane._live_follow`, from `_names_changed` — so Undo and bulk renames too — through
+`rename_tools.apply`). **Not carried: a drag out of the window, Duplicate, and the hidden original when a Live
+Photo is moved to another folder** (Separate there renames the movie "<name> (video).mov" instead).
+
+**The viewer** (`MediaViewer._live*`): `Hooks.live_motion` gives the photo's movie; a ◉ LIVE button shows. Three
+ways to play, the first two the platforms' own: the pointer resting on LIVE (Photos on the Mac) plays once;
+**press and hold on the photo** (iPhone) plays, looping, until let go; a click on LIVE or Space plays once. The
+movie plays on the video stage in place of the photo and the stack goes back when it ends. The mouse is
+**polled** (`_live_tick`, 60 ms), as the fading chrome's is: the stage under the pointer changes mid-press and
+macOS's own views take the events; a hold is a press that began on the fitted photo and hasn't moved 6 px in
+0.32 s, and the release that ends it isn't taken for a click (`_no_tap_until`).
+
+**Find Live Photos** (`live_photo.candidates`, `LiveFindWindow`): same-named photo + video pairs in a folder
+(optionally its tree), those already Live counted apart. Each row is painted (thousands open at once): tick,
+photo, video's picture with its length, names, and what's known — "likely" (ticked) unless the video is over 6 s,
+the files are dated more than two minutes apart, or each already belongs to another Live Photo, with the reason
+shown. Made one after another on a thread (Stop between), inside `edit_undo.batched`.
+
+Tests (scratchpad): `live/t_engine.py` (ffmpeg-made videos — plain, faststart, silent, with their own metadata;
+JPEGs with / without Exif and with another maker note; an HEIC; a PNG; make / find / index / separate, byte for
+byte) and `ui2/t_live.py` (in the app: listing, mark, viewer play / hold / end, rename, Show Live Photo Videos,
+the Find window, bulk make, Separate, menus). **Not tried on a Mac**: the ImageIO helper, video thumbnails in the
+Find window (they come from the Mac's own thumbnailer), the feel of press-and-hold, and Apple Photos' import.
+
 ## 6w-3. Make Book: pictures beside the text, placed and sized freely, on a live page — `mac/bookify.py`, `mac/book_pictures.py` (Nov 23, 2026)
 
 **Asked for:** "allowing the user to embed pictures next to text/paragraphs. Give the user full autonomy as to

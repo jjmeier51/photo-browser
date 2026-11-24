@@ -123,6 +123,7 @@ class Hooks:
     edit_photo: Callable[[str], None] | None = None           # the photo → the photo editor
     edit_with_ai: Callable[[str], None] | None = None         # the photo → Edit with AI (ai_window.py)
     shown: Callable[[str], None] | None = None                # the viewer moved to this file (the pane's highlight follows)
+    live_motion: Callable[[str], str] | None = None           # a photo → its Live Photo's movie ("" — it isn't one)
     extra: dict = field(default_factory=dict)
 
 
@@ -1285,6 +1286,10 @@ VIEWER_STYLE = f"""
 #ViewerBottom QLabel#ViewerTime {{ color: #C7C7CC; font-size: 11px; }}
 QLabel#ViewerRes {{ color: #A1A1A6; font-size: 11px; font-weight: 600; padding: 1px 3px; }}
 QLabel#ViewerHDR {{ color: #E8C46A; font-size: 11px; font-weight: 700; padding: 1px 3px; }}
+QToolButton#ViewerLive {{ color: #F2F2F7; background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.35);
+                          border-radius: 9px; padding: 1px 8px; font-size: 11px; font-weight: 700; }}
+QToolButton#ViewerLive:hover, QToolButton#ViewerLive:checked {{ background: rgba(255,214,10,0.30);
+                                                                 border-color: #FFD60A; color: #FFD60A; }}
 QToolButton#ViewerButton {{ color: #F2F2F7; background: transparent; border: none; border-radius: 7px;
                             padding: 4px 7px; font-size: 13px; }}
 QToolButton#ViewerButton:hover {{ background: rgba(255,255,255,0.14); }}
@@ -1497,7 +1502,21 @@ class MediaViewer(QWidget):
         self.video.swiped.connect(self.go)
         self.image.tapped.connect(self.toggle_chrome)
         self.video.tapped.connect(self.toggle_chrome)
-        self.video.ended.connect(lambda: self.go(1) if self.slideshow else None)
+        self.video.ended.connect(self._video_ended)
+        # A Live Photo (live_photo.py): the photo on show has a movie. It plays while the photo is pressed and
+        # held (as on the iPhone), while the pointer rests on LIVE (as in Photos on the Mac), or once through on
+        # a click of LIVE / Space. The mouse is polled, not listened for — the stage changes under it (photo →
+        # movie → photo), and macOS's own views take the events.
+        self._live = ""                # the movie of the photo on show ("" — it isn't a Live Photo)
+        self._live_on = ""             # playing it: "hold", "hover" or "once"
+        self._live_back = None         # the stage to go back to
+        self._live_down: tuple[float, QPoint] | None = None
+        self._live_hover: float | None = None
+        self._live_hovered = False     # played for this visit of the pointer: not again until it leaves
+        self._no_tap_until = 0.0
+        self._live_poll = QTimer(self)
+        self._live_poll.setInterval(60)
+        self._live_poll.timeout.connect(self._live_tick)
         self.video.position_changed.connect(self._position)
         self.video.playing_changed.connect(self._playing)
         self.image.zoom_changed.connect(self._zoom_label)
@@ -1582,6 +1601,18 @@ class MediaViewer(QWidget):
             h.addWidget(b)
         self.frames_btn.setVisible(False)              # Export All Frames is in ⋯ (the bar stays narrow)
         h.addSpacing(6)
+        self.live_btn = QToolButton()
+        self.live_btn.setObjectName("ViewerLive")
+        self.live_btn.setText("◉ LIVE")
+        self.live_btn.setCheckable(True)
+        self.live_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.live_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.live_btn.setToolTip("A Live Photo — rest the pointer here, or press and hold the photo, to play it "
+                                 "(Space plays it once)")
+        self.live_btn.clicked.connect(self.play_live)
+        self.live_btn.setVisible(False)
+        h.addWidget(self.live_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        h.addSpacing(3)
         self.res_badge = QLabel()
         self.res_badge.setObjectName("ViewerRes")
         self.hdr_badge = QLabel("HDR")
@@ -1764,6 +1795,7 @@ class MediaViewer(QWidget):
 
     def show_current(self) -> None:
         self._slide.stop()
+        self._live_stop()
         if not self.paths:
             self.close()
             return
@@ -1791,6 +1823,14 @@ class MediaViewer(QWidget):
             except Exception:  # noqa: BLE001 — a pane that has moved on is no reason to stop showing
                 pass
         self._exact_time = False
+        self._live = "" if video else self._motion_of(path)
+        self._live_down, self._live_hover, self._live_hovered = None, None, False
+        self.live_btn.setVisible(bool(self._live))
+        self.live_btn.setChecked(False)
+        if self._live:
+            self._live_poll.start()
+        else:
+            self._live_poll.stop()
         self.remove_act.setVisible(not video and self.hooks.remove_objects is not None)
         self._show_labels()
         self._show_badges(path)
@@ -1858,8 +1898,99 @@ class MediaViewer(QWidget):
     def _space(self) -> None:
         if is_video(self.current):
             self.video.toggle()
+        elif self._live:
+            self.play_live()
         else:
             self.go(1)
+
+    # ------------------------------------------------------------------ Live Photos
+    def _motion_of(self, path: str) -> str:
+        if self.hooks.live_motion is None:
+            return ""
+        try:
+            movie = self.hooks.live_motion(path) or ""
+        except Exception:  # noqa: BLE001 — a pair that can't be read is just a photo
+            return ""
+        return movie if movie and os.path.isfile(movie) else ""
+
+    def play_live(self) -> None:
+        """LIVE clicked (or Space): the Live Photo's movie once through — or, while it's playing, back to the photo."""
+        if self._live_on:
+            self._live_stop()
+        elif self._live:
+            self._live_start("once")
+
+    def _live_start(self, how: str) -> None:
+        if self._live_on or not self._live or is_video(self.current):
+            return
+        self._live_on = how
+        self._live_back = self.stack.currentWidget()
+        self.live_btn.setChecked(True)
+        if self.slideshow:
+            self._slide.stop()
+        self.stack.setCurrentWidget(self.video)
+        self.video.show_video(self._live, None)
+        self.video.loop = how == "hold"                    # held: over and over, as on the iPhone
+
+    def _live_stop(self) -> None:
+        if not self._live_on:
+            return
+        held, self._live_on = self._live_on == "hold", ""
+        self.live_btn.setChecked(False)
+        self.video.stop()
+        self.video.loop = self.loop_act.isChecked() and not self.slideshow
+        back = self._live_back if self._live_back is not None else self.image
+        self._live_back = None
+        if self.paths and not is_video(self.current):
+            self.stack.setCurrentWidget(back)
+            if self.slideshow:
+                self._slide.start(int(SLIDE_SECONDS * 1000))
+        if held:
+            self._no_tap_until = time.monotonic() + 0.45   # the release that ends a hold isn't a click on the photo
+
+    def _video_ended(self) -> None:
+        if self._live_on:
+            self._live_stop()
+        elif self.slideshow:
+            self.go(1)
+
+    def _live_tick(self) -> None:
+        """Watches the pointer while a Live Photo is on show: held on the photo → plays (until let go); resting on
+        LIVE → plays once (again when it has left and come back)."""
+        if not self._live or not self.isVisible():
+            return
+        now, pos = time.monotonic(), QCursor.pos()
+        down = bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
+        mine = QApplication.activeWindow() is self and QApplication.activePopupWidget() is None
+        on_badge = mine and self.live_btn.isVisible() and self.live_btn.rect().contains(self.live_btn.mapFromGlobal(pos))
+        on_photo = mine and self.stack.rect().contains(self.stack.mapFromGlobal(pos))
+        if self._live_on == "hold":
+            if not down:
+                self._live_stop()
+            return
+        if self._live_on == "hover":
+            if not on_badge:
+                self._live_stop()
+            return
+        if not on_badge:
+            self._live_hover, self._live_hovered = None, False
+        elif not down and not self._live_on and not self._live_hovered:
+            if self._live_hover is None:
+                self._live_hover = now
+            elif now - self._live_hover >= 0.3:
+                self._live_hovered = True
+                self._live_start("hover")
+        if self._live_on:
+            return
+        if not down:
+            self._live_down = None
+        elif self._live_down is None:
+            # (only a press that began on the photo, at its fitted size — a zoomed photo is being dragged about)
+            self._live_down = (now, pos) if on_photo and getattr(self.stage, "fitted", True) else (float("inf"), pos)
+        elif (pos - self._live_down[1]).manhattanLength() > 6:
+            self._live_down = (float("inf"), pos)             # it moved: a swipe or a drag, not a hold
+        elif now - self._live_down[0] >= 0.32:
+            self._live_start("hold")
 
     def _escape(self) -> None:
         if self.isFullScreen():
@@ -2184,6 +2315,8 @@ class MediaViewer(QWidget):
         self.say(self.hooks.set_cover(path, seconds))
 
     def toggle_chrome(self) -> None:
+        if time.monotonic() < self._no_tap_until:          # (letting go of a held Live Photo)
+            return
         self.chrome = not self.chrome
         self.top.setVisible(self.chrome)
         self.bottom.setVisible(self.chrome)

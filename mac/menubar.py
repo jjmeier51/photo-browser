@@ -337,6 +337,10 @@ def install(win, sf) -> None:
                  "Files and folders whose names start with a dot — the apps' own records on the drive among them")
     hidden.setCheckable(True)
     v.aboutToShow.connect(lambda: hidden.setChecked(bool(win.show_hidden)))
+    live_videos = act(v, "Show Live Photo Videos", lambda: win.set_show_live_videos(not win.show_live_videos), None, None,
+                      "A Live Photo is one item — its photo, with the LIVE mark. This lists its movie beside it as well")
+    live_videos.setCheckable(True)
+    v.aboutToShow.connect(lambda: live_videos.setChecked(bool(win.show_live_videos)))
     act(v, "Refresh", lambda: pane().refresh(), "Ctrl+R", None, "Reads this folder — or runs this search — again")
     v.addSeparator()
     act(v, "Bigger Thumbnails", lambda: pane().slider.setValue(min(320, pane().slider.value() + 24)), "Ctrl+=")
@@ -458,6 +462,17 @@ def install(win, sf) -> None:
         "The edit copied in the photo editor (Edits ▾ ▸ Copy Edits), on every selected photo")
     act(t, "Make Collage…", lambda: pane().make_collage(photos()), None, lambda: 2 <= len(photos()) <= 9,
         "The two to nine selected photos on one picture — dozens of layouts, shapes and sizes")
+    live = submenu(t, "Live Photo")
+    act(live, "Make Live Photo", lambda: pane().make_live_photo(*pane().live_pair(sel())) if pane().live_pair(sel()) else None,
+        None, lambda: pane().live_pair(sel()) is not None,
+        "Select one photo and one video: the video becomes the photo's Live Photo movie, as on an iPhone. The "
+        "video as it was is kept, hidden — nothing is deleted")
+    act(live, "Separate Live Photo", lambda: pane().separate_live([p for p in sel() if sf.live_motion_of(p)]), None,
+        lambda: any(sf.LIVE is not None and sf.LIVE.motion(p) for p in sel()),
+        "The selected Live Photos become a photo and a video again")
+    act(live, "Find Live Photos…", lambda: pane().find_live_photos(folder_target()), None, folder_target,
+        "Photos and videos in this folder that share a name (IMG_1234.jpeg + IMG_1234.mov), side by side — tick the "
+        "ones that are the same moment and make them all into Live Photos")
     adjust = submenu(t, "Adjust")
     act(adjust, "Crop…", lambda: pane().crop_photos(photos()), None, lambda: bool(photos()),
         "One crop, drawn once, on every selected photo")
