@@ -294,6 +294,10 @@ actions the app makes no network calls.
   `media_info.spec` (header reads; ffprobe for WebM/MKV; None = unknown, never "Low-Res"), read off the window's
   thread and kept by `specs()` (`_Facts(kind="spec", lookup_off_thread=True)`, keyed path + modified time); the
   listing catches up on a timer (`Pane._specs_in`). Nothing is read until one of them is chosen.
+  The funnel's first submenu is **Folders: Show Favorites / Hide Favorites** (`PaneModel.folder_favs` — folders
+  only, by the Favorite label; files are never touched), and Sort ▸ **Show Size** (View menu too) draws each
+  folder's size after its name — "Ireland (2.1 GB)" — through `PaneModel.shown_name` / `size_suffix`: **draw names
+  with `shown_name`, do everything else with `fileName`** (§6az).
   Photo Browser for Mac's **PDF viewer** (double-click a PDF; `mac/pdf_viewer.py`, QtPdf) has **Optimize for iPhone** (new
   "<name> (for iPhone).pdf": iPhone 17 Pro Max-shaped pages, margins trimmed, two-column pages read a column at a time,
   cut only between lines) and **Optimize for Mac** (trimmed pages, blanks dropped) — `mac/pdf_optimize.py`

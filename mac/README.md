@@ -870,13 +870,17 @@ iPhone too, and one you set on the iPhone is shown that way here.
 
 - **Folder sizes.** Each pane adds up what its folders hold, in the background, and shows it in the
   list view's Size column (and the folder's tooltip); "Calculate Folder Sizes" in the Sort menu turns
-  it off. Sort by Size orders folders by what they hold. The status line shows the selection's size;
+  it off. **Show Size** (Sort menu, under Videos at the Top; also in the View menu) writes each folder's size
+  right after its name in every view — "Ireland (2.1 GB)" — and is remembered. Sort by Size orders folders by what they hold. The status line shows the selection's size;
   the Move/Copy summary counts folders by it too.
 - **Filters — the iPhone app's Type, Format, Resolution, HDR and Location, and Size.** The funnel button next
   to Sort opens a submenu for each, titled with what it's set to; they combine, apply to the listing or to search
   results and collections, and the status line says how many are shown and by what ("12 items (4 shown —
   photos · HEIF · Hauppauge, NY)"). **Show Everything** clears them. Type, Format and Size stay as you go
   from folder to folder; a Location is the folder's own and is cleared when you leave it.
+  - **Folders**: **Show Favorites** keeps, of the folders, only the ones you've favorited (the heart, shared
+    with the iPhone); **Hide Favorites** keeps every folder except those. Folders only — the files beside them
+    stay as they are.
   - **Type**: Photos, Videos or Screenshots (a PNG, or a photo with "screenshot" in its name) — as on the
     iPhone. **Format**: JPEG, PNG, HEIF, RAW, GIF, MOV, MP4 or AVI. Either one shows files only.
   - **Video Resolution**: 4K (3840 pixels and up on the long side), 1080p, 720p or Low-Res. **Photo

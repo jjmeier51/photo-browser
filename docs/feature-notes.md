@@ -2011,6 +2011,33 @@ HDR test is the viewer's existing one); on a very large folder over a slow drive
 at a time, but the first pass over tens of thousands of files will take a while — the status line counts it
 down).
 
+## 6az. Favorite-folder filter and "Show Size" on the Mac — `PaneModel.folder_favs`, `PaneModel.shown_name` (Nov 24, 2026)
+
+**Asked for:** in the filters, "Show Favorites" and "Hide Favorites" that apply to folders only; and a "Show
+Size" toggle beside Videos at the Top that puts each folder's size right after its name — "Ireland (2.1 GB)".
+
+**Folders: All / Show Favorites / Hide Favorites** — the funnel's first submenu (`FOLDER_FAV_FILTERS`,
+`Pane.set_folder_favs` → `PaneModel.set_folder_favs`). In `filterAcceptsRow` it looks at **folders only**: Show
+Favorites keeps, of the folders, the ones carrying the Favorite label (`labels_of` — the heart shared with the
+iPhone through `shared-tags.json`); Hide Favorites keeps every folder but those. Files in the listing are never
+touched by it, favorite or not. It stacks with the other filters (a Type / Format / resolution still hides all
+folders, as before), stays on from folder to folder, shows in the status line ("favorite folders only" /
+"favorite folders hidden") and is cleared by Show Everything. A folder favorited or unfavorited while it's on
+comes or goes at once (`Pane.on_tags_changed` re-runs the filter).
+
+**Sort ▸ Show Size** (right after Videos at the Top; also View ▸ Show Size). `PaneModel.name_sizes` →
+`shown_name(index)` = the name + `size_suffix(index)` (" (2.1 GB)", the same `human()` wording as the Size column),
+for folders in a folder's listing once the size has been added up — until then just the name. Drawn in all three
+views: the icon tiles (`two_lines`), the list's Name column (the proxy's DisplayRole for column 0) and the Photo
+Grid, where a tile too narrow for both puts the size whole on the line under the name rather than cutting it.
+**Only what's drawn changes**: `fileName`, paths, sorting, rename and drag all still go by the real name. It's a
+view setting for the pane (`<role>/name_sizes`, remembered), not a per-folder option like Videos at the Top. It
+needs the sizes, so turning it on turns **Calculate Folder Sizes** on, and turning that off turns this off;
+`size_known` now repaints the name cell too. Sizes are the sizer's (added up in the background, as for the Size
+column) — a folder whose contents change shows its new size when the listing is next read.
+
+Tested offscreen (`ui2/t_favsize.py`, 20 checks; screenshots of all three views). Not run on a Mac.
+
 ## 6w-3. Make Book: pictures beside the text, placed and sized freely, on a live page — `mac/bookify.py`, `mac/book_pictures.py` (Nov 23, 2026)
 
 **Asked for:** "allowing the user to embed pictures next to text/paragraphs. Give the user full autonomy as to

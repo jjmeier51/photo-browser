@@ -299,6 +299,10 @@ def install(win, sf) -> None:
                "and shown the same way on the iPhone")
     vtop.setCheckable(True)
     v.aboutToShow.connect(lambda: vtop.setChecked(bool(pane().model.videos_first)))
+    nsize = act(v, "Show Size", lambda: pane().set_name_sizes(not pane().model.name_sizes), None, None,
+                "Each folder's size right after its name — Ireland (2.1 GB)")
+    nsize.setCheckable(True)
+    v.aboutToShow.connect(lambda: nsize.setChecked(bool(pane().model.name_sizes)))
     sort = v.addMenu("Sort By")
     sort_group = QActionGroup(win)
     sort_acts = {}

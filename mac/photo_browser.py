@@ -1948,7 +1948,7 @@ class GridDelegate(QStyledItemDelegate):
         # name
         fm = QFontMetrics(option.font)
         width = r.width() - 2 * inset
-        lines = two_lines(fm, model.fileName(index), width)
+        lines = two_lines(fm, model.shown_name(index), width)
         lh = fm.height()
         top = icon_rect.bottom() + 6
         if selected:
@@ -2303,9 +2303,18 @@ class PhotoDelegate(QStyledItemDelegate):
             p.fillRect(QRect(r.x(), r.bottom() - band, r.width(), band + 1), grad)
             p.setFont(small)
             p.setPen(QColor("white") if pic is not None else QColor(THEME.text))
-            name = fm.elidedText(model.fileName(index), Qt.TextElideMode.ElideMiddle, r.width() - 12)
-            p.drawText(QRect(r.x() + 6, r.bottom() - fm.height() - 6, r.width() - 12, fm.height()),
-                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+            plain, suffix = model.fileName(index), model.size_suffix(index)        # (Sort ▸ Show Size)
+            room, line = r.width() - 12, fm.height()
+            flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            if suffix and fm.horizontalAdvance(plain + suffix) > room:
+                # a narrow tile: the name on one line, its size whole on the line under it
+                p.drawText(QRect(r.x() + 6, r.bottom() - 2 * line - 5, room, line), flags,
+                           fm.elidedText(plain, Qt.TextElideMode.ElideMiddle, room))
+                p.drawText(QRect(r.x() + 6, r.bottom() - line - 5, room, line), flags,
+                           fm.elidedText(suffix.strip(), Qt.TextElideMode.ElideRight, room))
+            else:
+                p.drawText(QRect(r.x() + 6, r.bottom() - line - 6, room, line), flags,
+                           fm.elidedText(plain + suffix, Qt.TextElideMode.ElideMiddle, room))
         if kind == "video":
             length = durations.get((path, model.lastModified(index).toSecsSinceEpoch()))
             if length:
@@ -2745,7 +2754,7 @@ class ListView(BoxSelect, DropMixin, QTreeView):
         if idx.column() != 0:
             return False
         r = self.visualRect(idx)
-        name = self.pane.model.fileName(idx)
+        name = self.pane.model.shown_name(idx)
         return pos.x() <= r.x() + self.iconSize().width() + 16 + QFontMetrics(self.font()).horizontalAdvance(name)
 
     def box_rect(self, idx: QModelIndex) -> QRect:
@@ -2840,6 +2849,8 @@ FORMAT_FILTERS = [
 # The iPhone's resolution filters (`VideoRes`, `ImageRes`): a video by its long side — 4K is 3840 and up, 1080p
 # 1920 and up, 720p 1280 and up, Low-Res the rest (`media_info.video_res`) — and a photo by its pixels, 2MP+ or
 # Low-Res. 12MP+ and 48MP+ are this app's own, for telling full-size camera photos from saved copies.
+# Folders by whether they're a Favorite (the heart, shared with the iPhone): files are never touched by it.
+FOLDER_FAV_FILTERS = [("", "All"), ("show", "Show Favorites"), ("hide", "Hide Favorites")]
 VIDEO_RES_FILTERS = [("", "All"), ("4k", "4K"), ("1080p", "1080p"), ("720p", "720p"), ("low", "Low-Res")]
 IMAGE_RES_FILTERS = [("", "All"), ("48mp", "48MP+"), ("12mp", "12MP+"), ("2mp", "2MP+"), ("low", "Low-Res")]
 IMAGE_RES_FLOOR = {"48mp": 48_000_000, "12mp": 12_000_000, "2mp": media_info.LOW_RES_PIXELS}
@@ -4060,6 +4071,8 @@ class PaneModel(QSortFilterProxyModel):
         self.format_exts: frozenset[str] = frozenset()
         self.place: str | None = None                # a Location label ("" = no location), None = any
         self.label_of: Callable[[str, int, int], str | None] | None = None   # (path, mtime, size) → label
+        self.folder_favs = ""                        # "show": only favorite folders; "hide": none of them (files stay)
+        self.name_sizes = False                      # "Ireland (2.1 GB)": a folder's size after its name
         self.video_res = ""                          # VIDEO_RES_FILTERS / IMAGE_RES_FILTERS keys, and HDR only
         self.image_res = ""
         self.hdr_only = False
@@ -4083,6 +4096,33 @@ class PaneModel(QSortFilterProxyModel):
         self.type_filter, self.format_exts, self.place = type_filter, format_exts, place
         self.invalidateFilter()
 
+    def set_folder_favs(self, mode: str) -> None:
+        if mode != self.folder_favs:
+            self.folder_favs = mode
+            self.invalidateFilter()
+
+    def set_name_sizes(self, on: bool) -> None:
+        self.name_sizes = bool(on)
+        if self._is_fs and self.root_path:           # every name in the listing is drawn again
+            parent = self.mapFromSource(self.sourceModel().index(self.root_path))
+            rows = self.rowCount(parent)
+            if rows:
+                self.dataChanged.emit(self.index(0, 0, parent), self.index(rows - 1, 0, parent),
+                                      [Qt.ItemDataRole.DisplayRole])
+
+    def shown_name(self, index: QModelIndex) -> str:
+        """The item's name as the views draw it: a folder's with its size after it — "Ireland (2.1 GB)" — when
+        Show Size is on and the size has been added up (till then, just the name)."""
+        return self.fileName(index) + self.size_suffix(index)
+
+    def size_suffix(self, index: QModelIndex) -> str:
+        """" (2.1 GB)" for a folder under Show Size, once its size is known — else ""."""
+        if self.name_sizes and self._is_fs and self.isDir(index):
+            size = folder_size(self.filePath(index))
+            if size is not None:
+                return f" ({human(size)})"
+        return ""
+
     def set_res_filters(self, video_res: str, image_res: str, hdr_only: bool) -> None:
         if (video_res, image_res, hdr_only) != (self.video_res, self.image_res, self.hdr_only):
             self.video_res, self.image_res, self.hdr_only = video_res, image_res, hdr_only
@@ -4093,7 +4133,7 @@ class PaneModel(QSortFilterProxyModel):
 
     def filtering(self) -> bool:
         return bool(self.size_filter is not None or self.type_filter or self.format_exts or self.place is not None
-                    or self.by_spec())
+                    or self.by_spec() or self.folder_favs)
 
     def filterAcceptsRow(self, row: int, parent: QModelIndex) -> bool:  # noqa: N802
         if self.hide_motion and LIVE is not None and LIVE.any():
@@ -4107,6 +4147,10 @@ class PaneModel(QSortFilterProxyModel):
             return True                              # never the listed folder's own ancestors
         idx = src.index(row, 0, parent)
         is_dir = src.isDir(idx)
+        if self.folder_favs and is_dir:              # folders only: the files beside them are left as they are
+            fav = "favorite" in labels_of(src.filePath(idx))
+            if fav != (self.folder_favs == "show"):
+                return False
         if self.type_filter or self.format_exts:     # files only, as on the iPhone
             if is_dir:
                 return False
@@ -4158,6 +4202,8 @@ class PaneModel(QSortFilterProxyModel):
                     return "—" if size is None else human(size)
                 if role == Qt.ItemDataRole.TextAlignmentRole:
                     return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            elif index.column() == 0 and role == Qt.ItemDataRole.DisplayRole and self.name_sizes:
+                return self.shown_name(index)              # (the list view's Name column; the tiles ask themselves)
             elif index.column() == 0 and role == Qt.ItemDataRole.ToolTipRole:
                 size = folder_size(self.filePath(index))
                 return self.filePath(index) + ("" if size is None else f"\n{human(size)}")
@@ -4214,7 +4260,7 @@ class PaneModel(QSortFilterProxyModel):
         idx = self.mapFromSource(src_idx)
         if idx.isValid():
             cell = idx.siblingAtColumn(1)
-            self.dataChanged.emit(cell, cell, [Qt.ItemDataRole.DisplayRole])
+            self.dataChanged.emit(idx if self.name_sizes else cell, cell, [Qt.ItemDataRole.DisplayRole])
 
     def set_source(self, model: "QFileSystemModel | ResultsModel") -> None:
         self._is_fs = isinstance(model, QFileSystemModel)
@@ -4432,7 +4478,9 @@ class Pane(QWidget):
         self.model = PaneModel(self)               # what the views show: fs or results, in the chosen order
         self.model.set_source(self.fs)
         self.model.show_sizes = settings.value(f"{role}/sizes", "true") == "true"
+        self.model.name_sizes = self.model.show_sizes and settings.value(f"{role}/name_sizes", "false") == "true"
         self.size_filter_key = ""
+        self.folder_fav_key = ""                    # "show" / "hide": favorite folders only, or none of them
         # The iPhone's Type, Format and Location filters (`_filter_menu`). Type, Format and size stay as you move
         # from folder to folder; a Location is the listing's own, so it's cleared when you leave.
         self.type_filter_key = ""
@@ -4514,7 +4562,8 @@ class Pane(QWidget):
         self.search.installEventFilter(self)
         h.addWidget(self.search)
         h.addSpacing(2)
-        self.filter_btn = self._tool("funnel", "Filter — type, format, resolution, HDR, location, size", None, "Nav")
+        self.filter_btn = self._tool("funnel", "Filter — favorite folders, type, format, resolution, HDR, location, "
+                                     "size", None, "Nav")
         self.filter_btn.setMenu(self._filter_menu())
         self.filter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         h.addWidget(self.filter_btn)
@@ -4765,6 +4814,13 @@ class Pane(QWidget):
                                             "and other files. Remembered for this folder — and shown the same way "
                                             "by Photo Browser on the iPhone")
         self.videos_first_action.triggered.connect(self.set_videos_first)
+        self.name_sizes_action = menu.addAction("Show Size")
+        self.name_sizes_action.setCheckable(True)
+        self.name_sizes_action.setChecked(self.model.name_sizes)
+        self.name_sizes_action.setToolTip("Each folder's size right after its name — Ireland (2.1 GB) — in every "
+                                          "view. Sizes are added up in the background and appear as they're known")
+        self.name_sizes_action.triggered.connect(self.set_name_sizes)
+        menu.setToolTipsVisible(True)
         menu.addSeparator()
         self.sizes_action = menu.addAction("Calculate Folder Sizes")
         self.sizes_action.setCheckable(True)
@@ -4781,6 +4837,11 @@ class Pane(QWidget):
         or to a search's or collection's results."""
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
+        self.folder_fav_menu, self.folder_fav_actions = self._choice_menu(menu, FOLDER_FAV_FILTERS,
+                                                                          self.set_folder_favs)
+        self.folder_fav_menu.setToolTipsVisible(True)
+        self.folder_fav_actions["show"].setToolTip("Of the folders, only your Favorites — files are left as they are")
+        self.folder_fav_actions["hide"].setToolTip("Every folder except your Favorites — files are left as they are")
         self.type_menu, self.type_actions = self._choice_menu(menu, TYPE_FILTERS, self.set_type_filter)
         self.format_menu, self.format_actions = self._choice_menu(
             menu, [(k, label) for k, label, _exts in FORMAT_FILTERS], self.set_format_filter)
@@ -4864,6 +4925,12 @@ class Pane(QWidget):
         self.place_filter = label
         self._filters_changed()
 
+    def set_folder_favs(self, key: str) -> None:
+        """Filter ▸ Folders: Show Favorites (of the folders, only the favorited ones) or Hide Favorites (every
+        folder but those). Folders only — the files in the listing aren't touched."""
+        self.folder_fav_key = key if key in dict(FOLDER_FAV_FILTERS) else ""
+        self._filters_changed()
+
     # -- the iPhone's resolution and HDR filters
     def set_video_res(self, key: str) -> None:
         self.video_res_key = key if key in dict(VIDEO_RES_FILTERS) else ""
@@ -4906,6 +4973,7 @@ class Pane(QWidget):
         self.type_filter_key = self.format_filter_key = ""
         self.video_res_key = self.image_res_key = ""
         self.hdr_only = False
+        self.folder_fav_key = ""
         self.place_filter = None
         if self.size_filter_key:
             self.set_size_filter("")
@@ -4913,11 +4981,13 @@ class Pane(QWidget):
 
     def any_filter(self) -> bool:
         return bool(self.type_filter_key or self.format_filter_key or self.place_filter is not None
-                    or self.size_filter_key or self.res_filtering())
+                    or self.size_filter_key or self.res_filtering() or self.folder_fav_key)
 
     def filter_summary(self) -> str:
         """What the filters let through, for the status line ("photos · HEIF · Hauppauge, NY")."""
         parts = []
+        if self.folder_fav_key:
+            parts.append("favorite folders only" if self.folder_fav_key == "show" else "favorite folders hidden")
         if self.type_filter_key:
             parts.append(dict(TYPE_FILTERS)[self.type_filter_key].lower())
         if self.format_filter_key:
@@ -4943,8 +5013,11 @@ class Pane(QWidget):
                 self.model.spec_of = self._spec_of
                 specs().ready.connect(self._specs_in, Qt.ConnectionType.QueuedConnection)
             self.model.set_res_filters(self.video_res_key, self.image_res_key, self.hdr_only)
+            self.model.set_folder_favs(self.folder_fav_key)
         if not hasattr(self, "type_menu"):
             return
+        self.folder_fav_actions[self.folder_fav_key].setChecked(True)
+        self.folder_fav_menu.setTitle(f"Folders: {dict(FOLDER_FAV_FILTERS)[self.folder_fav_key]}")
         self.type_actions[self.type_filter_key].setChecked(True)
         self.format_actions[self.format_filter_key].setChecked(True)
         self.video_res_actions[self.video_res_key].setChecked(True)
@@ -4961,7 +5034,7 @@ class Pane(QWidget):
         on = self.any_filter()
         self.clear_filters_act.setEnabled(on)
         self.filter_btn.setToolTip(f"Showing: {self.filter_summary()} — click to change" if on else
-                                   "Filter — type, format, resolution, HDR, location, size")
+                                   "Filter — favorite folders, type, format, resolution, HDR, location, size")
         self.filter_btn.setIcon(glyph("funnel", THEME.accent if on else THEME.secondary, 16))
         self._status_soon.start()
 
@@ -5120,8 +5193,29 @@ class Pane(QWidget):
             self.place_filter = None
             self._filters_changed()
 
+    def set_name_sizes(self, on: bool) -> None:
+        """Sort ▸ Show Size: each folder's size after its name ("Ireland (2.1 GB)"), in the icons, the Photo Grid
+        and the list. It needs the sizes, so it turns Calculate Folder Sizes on with it."""
+        on = bool(on)
+        self.settings.setValue(f"{self.role}/name_sizes", "true" if on else "false")
+        if on and not self.model.show_sizes:
+            self.sizes_action.setChecked(True)             # (→ set_show_sizes: asks for this listing's sizes)
+        self.model.set_name_sizes(on)
+        if hasattr(self, "name_sizes_action"):
+            self.name_sizes_action.setChecked(on)
+        if on:
+            self._request_sizes()
+        self.grid.viewport().update()
+        self.list.viewport().update()
+
     def set_show_sizes(self, on: bool) -> None:
+        if not on and self.model.name_sizes:               # no sizes to show after the names, then
+            self.set_name_sizes(False)
         self.model.show_sizes = on
+        if hasattr(self, "sizes_action") and self.sizes_action.isChecked() != on:      # (set from the menu bar)
+            self.sizes_action.blockSignals(True)
+            self.sizes_action.setChecked(on)
+            self.sizes_action.blockSignals(False)
         self.settings.setValue(f"{self.role}/sizes", "true" if on else "false")
         self.model.forget_keys()
         self.model.invalidate()
@@ -8609,6 +8703,8 @@ class Pane(QWidget):
         drops the files that no longer carry it."""
         self.grid.viewport().update()
         self.list.viewport().update()
+        if self.folder_fav_key:                            # a folder favorited or unfavorited: it comes or goes
+            self.model.invalidateFilter()
         if self.location.startswith(TAG):
             tag = self.location[len(TAG):]
             if self.results.remove_where(lambda path: not has_tag(path, tag)):
