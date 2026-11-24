@@ -449,3 +449,145 @@ def res_label(width: int, height: int) -> str:
 def image_info(path: str) -> dict:
     """{width, height (as shown), format, taken (unix), camera, place (lat, lng), caption}."""
     return _cached(path, "image", _read_image)
+
+
+# ----------------------------------------------------------------------------- resolution (the funnel's filters)
+
+# The iPhone app's resolution filters (`VideoRes`, `ImageRes`, `MediaSpec` in Models.swift), so "4K" and "2MP+"
+# mean the same thing on both: a video by its long side, a photo by how many pixels it has.
+VIDEO_RES = (("4k", 3840), ("1080p", 1920), ("720p", 1280))          # else "low"
+LOW_RES_PIXELS = 2_000_000                                            # a photo under this is "Low-Res"
+RAW_EXTS = {".dng", ".cr2", ".nef", ".arw", ".orf", ".rw2", ".raw", ".srw", ".pef", ".sr2", ".3fr", ".erf", ".nrw"}
+_TIFF_MAGICS = (42, 0x55, 0x4F52, 0x5352)                             # TIFF/DNG/NEF/ARW/CR2, RW2, ORF (two kinds)
+
+
+def video_res(long_side: int) -> str:
+    """"4k" / "1080p" / "720p" / "low" — the iPhone's `MediaSpec.videoRes` (4K is 3840 and up, so 8K too)."""
+    for key, edge in VIDEO_RES:
+        if long_side >= edge:
+            return key
+    return "low"
+
+
+def _raw_size(path: str) -> tuple[int, int] | None:
+    """A RAW photo's own size. Its first picture is usually a small preview, so every picture the file lists
+    (IFDs, their sub-IFDs, the EXIF block's stated size) is looked at and the largest taken."""
+    best = (0, 0)
+    with open(path, "rb") as f:
+        head = f.read(8)
+        if len(head) < 8 or head[:2] not in (b"II", b"MM"):
+            return None
+        e = "<" if head[:2] == b"II" else ">"
+        magic, first = struct.unpack(e + "HI", head[2:8])
+        if magic not in _TIFF_MAGICS:
+            return None
+        f.seek(0, 2)
+        end = f.tell()
+        todo, seen = [first], set()
+        while todo and len(seen) < 48:
+            at = todo.pop(0)
+            if at in seen or at < 8 or at + 2 > end:
+                continue
+            seen.add(at)
+            f.seek(at)
+            count = struct.unpack(e + "H", f.read(2))[0]
+            raw = f.read(count * 12 + 4)
+            if len(raw) < count * 12:
+                continue
+            got: dict[int, int] = {}
+            for i in range(count):
+                tag, kind, n = struct.unpack(e + "HHI", raw[i * 12:i * 12 + 8])
+                field = raw[i * 12 + 8:i * 12 + 12]
+                if tag in (256, 257, 2, 3, 40962, 40963) and n == 1 and kind in (3, 4):
+                    got[tag] = struct.unpack(e + ("H" if kind == 3 else "I"), field[:2 if kind == 3 else 4])[0]
+                elif tag in (330, 34665) and kind in (4, 13) and 0 < n <= 16:
+                    if n == 1:
+                        todo.append(struct.unpack(e + "I", field)[0])
+                    else:
+                        where = struct.unpack(e + "I", field)[0]
+                        if 8 <= where and where + 4 * n <= end:
+                            back = f.tell()
+                            f.seek(where)
+                            todo.extend(struct.unpack(e + f"{n}I", f.read(4 * n)))
+                            f.seek(back)
+            for w, h in ((256, 257), (2, 3), (40962, 40963)):          # a picture's, a Panasonic sensor's, EXIF's
+                if got.get(w) and got.get(h) and got[w] * got[h] > best[0] * best[1] and got[w] < 100000 > got[h]:
+                    best = (got[w], got[h])
+            if len(raw) >= count * 12 + 4:
+                todo.append(struct.unpack(e + "I", raw[count * 12:count * 12 + 4])[0])
+    return best if best[0] and best[1] else None
+
+
+def _image_size(path: str) -> tuple[int, int] | None:
+    ext = os.path.splitext(path)[1].lower()
+    if ext in RAW_EXTS:
+        try:
+            raw = _raw_size(path)
+        except (OSError, struct.error):
+            raw = None
+        if raw:
+            return raw
+    if ext == ".cr3":                                 # Canon's newer RAW is a movie-style file: its picture track
+        try:
+            info = _read_video(path)
+        except (OSError, struct.error, IndexError):
+            info = {}
+        if info.get("width") and info.get("height"):
+            return int(info["width"]), int(info["height"])
+        return None
+    from PIL import Image
+    try:
+        import batch_crop                             # registers HEIC with Pillow, when it can
+    except ImportError:
+        pass
+    try:
+        with Image.open(path) as im:                  # the header only: nothing is decoded
+            return im.size
+    except Image.DecompressionBombError as err:       # too big for Pillow to open — which says how big
+        import re
+        m = re.search(r"\((\d+) pixels\)", str(err))
+        if m:
+            side = int(int(m.group(1)) ** 0.5)
+            return side, int(m.group(1)) // max(1, side)
+        return None
+    except Exception:  # noqa: BLE001 — not a picture Pillow can read
+        return None
+
+
+def _probed_video(path: str) -> tuple[int, int, bool] | None:
+    """A video this module can't read itself (WebM, MKV, AVI, …), asked of ffprobe when it's installed."""
+    try:
+        import video_tools
+        doc = video_tools._ffprobe(path, "-select_streams", "v:0", "-show_entries",
+                                   "stream=width,height,color_transfer")
+        st = doc["streams"][0]
+        return int(st["width"]), int(st["height"]), str(st.get("color_transfer") or "") in ("smpte2084", "arib-std-b67")
+    except Exception:  # noqa: BLE001 — no ffprobe, or nothing it could say
+        return None
+
+
+def spec(path: str, kind: str) -> tuple[int, int, bool] | None:
+    """(long side, pixels, HDR) of a photo (`kind` "image") or a video ("video") — the iPhone's `MediaSpec` —
+    read from the file's header; None when it can't be told (so it's asked again another time, never guessed).
+    Turning a picture doesn't change either number, so its orientation isn't read. Safe on worker threads; not
+    cached here (the caller keeps it — `photo_browser.specs`)."""
+    if kind == "video":
+        info = video_info(path)
+        if info.get("width") and info.get("height"):
+            w, h, hdr = int(info["width"]), int(info["height"]), bool(info.get("hdr"))
+        else:
+            got = _probed_video(path)
+            if got is None:
+                return None
+            w, h, hdr = got
+    elif kind == "image":
+        size = _image_size(path)
+        if not size:
+            return None
+        w, h = size
+        hdr = image_hdr(path)
+    else:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return max(w, h), w * h, hdr

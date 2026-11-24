@@ -1944,6 +1944,73 @@ byte) and `ui2/t_live.py` (in the app: listing, mark, viewer play / hold / end, 
 the Find window, bulk make, Separate, menus). **Not tried on a Mac**: the ImageIO helper, video thumbnails in the
 Find window (they come from the Mac's own thumbnailer), the feel of press-and-hold, and Apple Photos' import.
 
+## 6ay. Resolution and HDR filters on the Mac — `media_info.spec`, `photo_browser.res_passes`, `Pane._filter_menu` (Nov 24, 2026)
+
+**Asked for:** the iPhone's video-resolution and image-resolution filters, in the Mac app.
+
+**What the funnel has now** (between Format and Location): **Video Resolution** — All / 4K / 1080p / 720p /
+Low-Res; **Photo Resolution** — All / 48MP+ / 12MP+ / 2MP+ / Low-Res; and a tick, **HDR Only**. The video bands
+and 2MP+ / Low-Res are the iPhone's exactly (`VideoRes`, `ImageRes`, `MediaSpec` in `Models.swift`), so the same
+choice shows the same files on both: a video goes by its **long side** — 4K is 3840 and up (so 8K too), 1080p
+1920–3839, 720p 1280–1919, Low-Res under 1280 (`media_info.video_res`) — and a photo by its **pixel count**, 2MP+
+being 2,000,000 and up (`media_info.LOW_RES_PIXELS`). 12MP+ and 48MP+ are the Mac's own ("at least" floors,
+`IMAGE_RES_FLOOR`), for telling full-size camera photos from saved copies.
+
+**How they combine** is the iPhone's `passesAdvanced`, in one pure function, `photo_browser.res_passes(kind, spec,
+video_res, image_res, hdr_only)`:
+
+- only photos and videos get through — folders and other files are hidden while any of the three is on;
+- a file whose size hasn't been read yet is hidden, and appears when it has been;
+- a video resolution alone shows only videos, a photo resolution alone only photos, **both together show both
+  kinds**, each by its own choice;
+- HDR narrows whatever else is chosen (HDR alone = every HDR photo and video).
+
+They stack with Type, Format, Location and Size like the other filters, apply to a folder's listing and to search
+results / collections alike, stay on from folder to folder, and are cleared by Show Everything. The status line
+says what's on ("14 items (2 shown — 4K videos)").
+
+**Where the numbers come from.** `media_info.spec(path, kind)` → `(long side, pixels, HDR)` or None, from the
+file's header only:
+
+- **videos**: the MP4/MOV boxes `video_info` already reads (track size as shown, HLG/PQ/Dolby Vision = HDR); a
+  container it can't read (WebM, MKV, AVI, MTS) is asked of **ffprobe** when ffmpeg is installed — one short call,
+  size and transfer curve;
+- **photos**: Pillow's header read (HEIC through pillow-heif) — nothing is decoded, and the orientation isn't
+  needed, since turning a picture changes neither number; **RAW** files (DNG, NEF, ARW, CR2, ORF, RW2, …) are
+  TIFF-shaped with a small preview first, so `_raw_size` walks every IFD, sub-IFD and the EXIF block and takes the
+  largest picture listed; CR3 by its picture track; a photo too big for Pillow to open is sized from Pillow's own
+  refusal. HDR is `image_hdr` — the same test as the viewer's HDR badge (a gain map, or an HLG/PQ curve);
+- **None** — a damaged file, a RAF, a WebM with no ffprobe — means *not known*: the file is left out of every
+  resolution/HDR filter rather than called Low-Res (the iPhone files an unreadable one under Low-Res; the Mac
+  doesn't guess), and since "nothing found" is never kept it's asked again on a later launch.
+
+**Reading and keeping them.** `photo_browser.specs()` is a `_Facts(kind="spec")` like the video lengths: four
+worker threads, keyed `(path, modified)`, kept in `facts.sqlite` between launches — a file is read **once**, and
+again only when it changes (an in-place crop or upscale gets a new modified time, so it moves band by itself).
+Two things are different from the other facts, because a filter asks about a *whole listing* at once rather than
+the tiles on screen:
+
+- `_Facts(lookup_off_thread=True)`: the store lookup happens on the workers too (`_kept` from `_work`), so
+  choosing a filter in a 20,000-file folder doesn't make 20,000 SQLite queries on the window's thread;
+- the listing catches up on a timer (`Pane._specs_in` → `_spec_soon`, 300 ms → `invalidateFilter`), not once per
+  batch — re-filtering a big listing on every batch would be quadratic.
+
+While sizes are still being read the status line says so ("0 shown — 4K videos; reading 1,204 more…",
+`Pane.filter_note` / `specs_left` ← `_Facts.left()`), and an empty view reads **Reading Resolutions…** instead of
+"Nothing Matches the Filter". Nothing is read, and no thread or timer exists, until one of the three filters is
+first chosen (`specs()` is made on first use; `Pane._specs_wired`).
+
+**Tested offscreen** (`ui2/t_res.py`, 31 checks): the rule's truth table; a folder of made-up media — photos of
+54, 12.2, 12, 2.0, 1.92 and 0.48 MP (JPEG, PNG, HEIC), one flagged HDR; videos at 3840×2160, 1080×1920 (portrait),
+1280×720 WebM, 640×360 MKV and a PQ HEVC 4K — through every choice and combination, with Type on top, in search
+results, Show Everything, each file read once, a photo shrunk in place moving to Low-Res, and the numbers
+answered from the store on a "second launch". Also a made-up DNG whose first IFD is a 256×171 preview.
+**Not tested:** on a Mac; on real camera RAW files (the walker is written from the TIFF layout — if a maker's
+file lists a larger size than its picture, it would land a band too high); on a real iPhone gain-map HEIC (the
+HDR test is the viewer's existing one); on a very large folder over a slow drive (reads are header-sized, four
+at a time, but the first pass over tens of thousands of files will take a while — the status line counts it
+down).
+
 ## 6w-3. Make Book: pictures beside the text, placed and sized freely, on a live page — `mac/bookify.py`, `mac/book_pictures.py` (Nov 23, 2026)
 
 **Asked for:** "allowing the user to embed pictures next to text/paragraphs. Give the user full autonomy as to

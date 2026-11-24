@@ -2097,12 +2097,15 @@ class _Facts(QObject):
     ready = Signal()
     _got = Signal()
 
-    def __init__(self, read, workers: int = 4, kind: str = "") -> None:
+    def __init__(self, read, workers: int = 4, kind: str = "", lookup_off_thread: bool = False) -> None:
         super().__init__()
         from concurrent.futures import ThreadPoolExecutor
         import facts_store
         self._read = read
         self._kind = kind
+        # A fact asked for a whole listing at once (a resolution filter over 20,000 files) is looked up in the
+        # store by the workers too — a lookup per file on the window's thread would hold it for a moment.
+        self._lookup_off = lookup_off_thread
         self._store = facts_store.default() if kind else None
         if self._store is not None:
             self._flusher = QTimer(self)
@@ -2128,20 +2131,43 @@ class _Facts(QObject):
             if key in self._asked:
                 return None
             self._asked.add(key)
-        if self._store is not None:                       # found on an earlier launch: there on the first paint
-            import facts_store
-            kept = self._store.get(self._kind, key)
-            if facts_store.FactsStore.known(kept):
-                if isinstance(kept, list):
-                    kept = tuple(kept)
-                if facts_store.valid(self._kind, kept):
-                    with self._lock:
-                        self._known[key] = kept
-                    return kept
+        if not self._lookup_off:                          # found on an earlier launch: there on the first paint
+            found, kept = self._kept(key)
+            if found:
+                with self._lock:
+                    self._known[key] = kept
+                return kept
         self._pool.submit(self._work, key)
         return None
 
+    def _kept(self, key) -> tuple[bool, object]:
+        """(whether the store holds a still-good value for `key`, the value)."""
+        if self._store is None:
+            return False, None
+        import facts_store
+        kept = self._store.get(self._kind, key)
+        if not facts_store.FactsStore.known(kept):
+            return False, None
+        if isinstance(kept, list):
+            kept = tuple(kept)
+        return (True, kept) if facts_store.valid(self._kind, kept) else (False, None)
+
+    def left(self) -> int:
+        """How many asked-for facts are still being read."""
+        with self._lock:
+            return max(0, len(self._asked) - len(self._known))
+
     def _work(self, key) -> None:
+        if self._lookup_off:
+            try:
+                found, kept = self._kept(key)
+            except Exception:  # noqa: BLE001 — a store that can't answer: read the file
+                found, kept = False, None
+            if found:
+                with self._lock:
+                    self._known[key] = kept
+                self._got.emit()
+                return
         try:
             value = self._read(key)
         except Exception:  # noqa: BLE001 — a fact that can't be read is just not shown
@@ -2190,8 +2216,23 @@ def covers_changed() -> None:
             pane.grid.viewport().update()
 
 
+def _read_spec(key) -> tuple[int, int, bool] | None:
+    return media_info.spec(key[0], kind_of(key[0]))
+
+
 DURATIONS: _Facts | None = None
 COVERS: _Facts | None = None
+SPECS: _Facts | None = None
+
+
+def specs() -> _Facts:
+    """(path, modified) → (long side, pixels, HDR) of a photo or video — what the resolution and HDR filters go
+    by (`res_passes`). Read off the window's thread and kept between launches, like the video lengths; made on
+    first use, so it costs nothing until a filter is chosen."""
+    global SPECS
+    if SPECS is None:
+        SPECS = _Facts(_read_spec, kind="spec", lookup_off_thread=True)
+    return SPECS
 
 
 def facts() -> tuple[_Facts, _Facts]:
@@ -2796,6 +2837,34 @@ FORMAT_FILTERS = [
     ("mp4", "MP4", frozenset({".mp4", ".m4v"})),
     ("avi", "AVI", frozenset({".avi"})),
 ]
+# The iPhone's resolution filters (`VideoRes`, `ImageRes`): a video by its long side — 4K is 3840 and up, 1080p
+# 1920 and up, 720p 1280 and up, Low-Res the rest (`media_info.video_res`) — and a photo by its pixels, 2MP+ or
+# Low-Res. 12MP+ and 48MP+ are this app's own, for telling full-size camera photos from saved copies.
+VIDEO_RES_FILTERS = [("", "All"), ("4k", "4K"), ("1080p", "1080p"), ("720p", "720p"), ("low", "Low-Res")]
+IMAGE_RES_FILTERS = [("", "All"), ("48mp", "48MP+"), ("12mp", "12MP+"), ("2mp", "2MP+"), ("low", "Low-Res")]
+IMAGE_RES_FLOOR = {"48mp": 48_000_000, "12mp": 12_000_000, "2mp": media_info.LOW_RES_PIXELS}
+
+
+def res_passes(kind: str, spec: tuple | None, video_res: str, image_res: str, hdr_only: bool) -> bool:
+    """Whether a file gets through the resolution / HDR filters — the iPhone's `passesAdvanced`: only photos and
+    videos whose size has been read; HDR narrows whatever else is chosen; a video resolution and a photo
+    resolution chosen together show both kinds (each by its own), one alone shows only its kind."""
+    if spec is None or kind not in ("image", "video"):
+        return False
+    long_side, pixels, hdr = spec
+    if hdr_only and not hdr:
+        return False
+    if not (video_res or image_res):
+        return True
+    if kind == "video":
+        return media_info.video_res(long_side) == video_res if video_res else not image_res
+    if not image_res:
+        return not video_res
+    if image_res == "low":
+        return pixels < media_info.LOW_RES_PIXELS
+    return pixels >= IMAGE_RES_FLOOR[image_res]
+
+
 PLACES_CAP = 30000                     # more files than this in one listing → "open a subfolder" (the iPhone's is 8,000:
                                        # naming is instant here — the table ships with the app)
 
@@ -3991,6 +4060,10 @@ class PaneModel(QSortFilterProxyModel):
         self.format_exts: frozenset[str] = frozenset()
         self.place: str | None = None                # a Location label ("" = no location), None = any
         self.label_of: Callable[[str, int, int], str | None] | None = None   # (path, mtime, size) → label
+        self.video_res = ""                          # VIDEO_RES_FILTERS / IMAGE_RES_FILTERS keys, and HDR only
+        self.image_res = ""
+        self.hdr_only = False
+        self.spec_of: Callable[[str, int], tuple | None] | None = None       # (path, mtime) → (long, pixels, hdr)
         self.root_path = ""                          # the folder listed — only its own rows are filtered
         self.videos_first = False                    # this folder's "Videos at the Top" (folder_options.py)
         self.hide_motion = True                      # a Live Photo's movie isn't listed beside its photo
@@ -4010,8 +4083,17 @@ class PaneModel(QSortFilterProxyModel):
         self.type_filter, self.format_exts, self.place = type_filter, format_exts, place
         self.invalidateFilter()
 
+    def set_res_filters(self, video_res: str, image_res: str, hdr_only: bool) -> None:
+        if (video_res, image_res, hdr_only) != (self.video_res, self.image_res, self.hdr_only):
+            self.video_res, self.image_res, self.hdr_only = video_res, image_res, hdr_only
+            self.invalidateFilter()
+
+    def by_spec(self) -> bool:
+        return bool(self.video_res or self.image_res or self.hdr_only)
+
     def filtering(self) -> bool:
-        return bool(self.size_filter is not None or self.type_filter or self.format_exts or self.place is not None)
+        return bool(self.size_filter is not None or self.type_filter or self.format_exts or self.place is not None
+                    or self.by_spec())
 
     def filterAcceptsRow(self, row: int, parent: QModelIndex) -> bool:  # noqa: N802
         if self.hide_motion and LIVE is not None and LIVE.any():
@@ -4033,6 +4115,16 @@ class PaneModel(QSortFilterProxyModel):
                 return False
             if self.type_filter and type_of(path) != self.type_filter:
                 return False
+        if self.by_spec():                           # photos and videos whose size is known, as on the iPhone
+            if is_dir or self.spec_of is None:
+                return False
+            path = src.filePath(idx)
+            kind = kind_of(path)
+            if kind == "other":
+                return False
+            spec = self.spec_of(path, src.lastModified(idx).toSecsSinceEpoch())
+            if not res_passes(kind, spec, self.video_res, self.image_res, self.hdr_only):
+                return False                         # (not read yet: it appears when it has been — `Pane._specs_in`)
         if self.place is not None and not is_dir:    # folders stay: their places aren't all read
             path, mtime, size = src.filePath(idx), src.lastModified(idx).toSecsSinceEpoch(), src.size(idx)
             if self.place.startswith("@"):             # a whole country ("@cc:FR") or region ("@region:US.NY")
@@ -4347,6 +4439,16 @@ class Pane(QWidget):
         self.format_filter_key = ""
         self.place_filter: str | None = None
         self.model.label_of = lambda path, mtime, size: places.shared().label(path, mtime, size)
+        # The iPhone's resolution and HDR filters. They go by each file's size in pixels, read in the background
+        # the first time (`specs`) — the listing fills in as they come (`_specs_in`).
+        self.video_res_key = ""
+        self.image_res_key = ""
+        self.hdr_only = False
+        self._specs_wired = False
+        self._spec_soon = QTimer(self)
+        self._spec_soon.setSingleShot(True)
+        self._spec_soon.setInterval(300)
+        self._spec_soon.timeout.connect(self._specs_caught_up)
         self._place_run: PlacePass | None = None
         self._place_note = ""                       # "Reading locations… 50 of 500", or why places can't be named
         self._places_done: tuple[str, int] | None = None   # (listing, files) the last finished pass covered
@@ -4412,7 +4514,7 @@ class Pane(QWidget):
         self.search.installEventFilter(self)
         h.addWidget(self.search)
         h.addSpacing(2)
-        self.filter_btn = self._tool("funnel", "Filter — type, format, location, size", None, "Nav")
+        self.filter_btn = self._tool("funnel", "Filter — type, format, resolution, HDR, location, size", None, "Nav")
         self.filter_btn.setMenu(self._filter_menu())
         self.filter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         h.addWidget(self.filter_btn)
@@ -4673,14 +4775,29 @@ class Pane(QWidget):
         return menu
 
     def _filter_menu(self) -> QMenu:
-        """The funnel: the iPhone app's Type, Format and Location filters, and the size filter — each a submenu
-        whose title says what it's set to. Like the iPhone's, a Type or a Format shows files only; a Location keeps
-        the folders (their places aren't all read). They apply to the listing, or to a search's or collection's
-        results."""
+        """The funnel: the iPhone app's Type, Format, resolution, HDR and Location filters, and the size filter —
+        each a submenu whose title says what it's set to. Like the iPhone's, a Type, a Format, a resolution or HDR
+        shows files only; a Location keeps the folders (their places aren't all read). They apply to the listing,
+        or to a search's or collection's results."""
         menu = QMenu(self)
+        menu.setToolTipsVisible(True)
         self.type_menu, self.type_actions = self._choice_menu(menu, TYPE_FILTERS, self.set_type_filter)
         self.format_menu, self.format_actions = self._choice_menu(
             menu, [(k, label) for k, label, _exts in FORMAT_FILTERS], self.set_format_filter)
+        self.video_res_menu, self.video_res_actions = self._choice_menu(menu, VIDEO_RES_FILTERS, self.set_video_res)
+        self.image_res_menu, self.image_res_actions = self._choice_menu(menu, IMAGE_RES_FILTERS, self.set_image_res)
+        for key, tip in (("4k", "Videos 3840 pixels or more on their long side"),
+                         ("1080p", "Videos from 1920 up to 4K on their long side"),
+                         ("720p", "Videos from 1280 up to 1080p on their long side"),
+                         ("low", "Videos under 1280 pixels on their long side")):
+            self.video_res_actions[key].setToolTip(tip)
+        for key, tip in (("48mp", "Photos of 48 megapixels or more"), ("12mp", "Photos of 12 megapixels or more"),
+                         ("2mp", "Photos of 2 megapixels or more"), ("low", "Photos under 2 megapixels")):
+            self.image_res_actions[key].setToolTip(tip)
+        self.hdr_action = menu.addAction("HDR Only")
+        self.hdr_action.setCheckable(True)
+        self.hdr_action.setToolTip("Only HDR photos and videos — within the resolutions chosen, when any are")
+        self.hdr_action.triggered.connect(self.set_hdr_only)
         self.place_menu = menu.addMenu("Location")
         self.place_menu.setToolTipsVisible(True)
         self.place_menu.aboutToShow.connect(self._place_menu_opened)
@@ -4747,8 +4864,48 @@ class Pane(QWidget):
         self.place_filter = label
         self._filters_changed()
 
+    # -- the iPhone's resolution and HDR filters
+    def set_video_res(self, key: str) -> None:
+        self.video_res_key = key if key in dict(VIDEO_RES_FILTERS) else ""
+        self._filters_changed()
+
+    def set_image_res(self, key: str) -> None:
+        self.image_res_key = key if key in dict(IMAGE_RES_FILTERS) else ""
+        self._filters_changed()
+
+    def set_hdr_only(self, on: bool) -> None:
+        self.hdr_only = bool(on)
+        self._filters_changed()
+
+    def res_filtering(self) -> bool:
+        return bool(self.video_res_key or self.image_res_key or self.hdr_only)
+
+    def _spec_of(self, path: str, mtime: int) -> tuple | None:
+        return specs().get((path, mtime))
+
+    def _specs_in(self) -> None:
+        """Some files' sizes were read: the listing catches up a few times a second, not once per batch."""
+        if self.res_filtering() and not self._spec_soon.isActive():
+            self._spec_soon.start()
+
+    def _specs_caught_up(self) -> None:
+        if self.res_filtering():
+            self.model.invalidateFilter()
+            self._status_soon.start()
+
+    def specs_left(self) -> int:
+        """How many files' sizes are still being read for the resolution / HDR filter (0 when none is on)."""
+        return specs().left() if self.res_filtering() and SPECS is not None else 0
+
+    def filter_note(self) -> str:
+        """`filter_summary`, and that more may still turn up while sizes are being read."""
+        left = self.specs_left()
+        return self.filter_summary() + (f"; reading {left:,} more…" if left else "")
+
     def clear_filters(self) -> None:
         self.type_filter_key = self.format_filter_key = ""
+        self.video_res_key = self.image_res_key = ""
+        self.hdr_only = False
         self.place_filter = None
         if self.size_filter_key:
             self.set_size_filter("")
@@ -4756,7 +4913,7 @@ class Pane(QWidget):
 
     def any_filter(self) -> bool:
         return bool(self.type_filter_key or self.format_filter_key or self.place_filter is not None
-                    or self.size_filter_key)
+                    or self.size_filter_key or self.res_filtering())
 
     def filter_summary(self) -> str:
         """What the filters let through, for the status line ("photos · HEIF · Hauppauge, NY")."""
@@ -4765,6 +4922,12 @@ class Pane(QWidget):
             parts.append(dict(TYPE_FILTERS)[self.type_filter_key].lower())
         if self.format_filter_key:
             parts.append(next(label for k, label, _e in FORMAT_FILTERS if k == self.format_filter_key))
+        if self.video_res_key:
+            parts.append(dict(VIDEO_RES_FILTERS)[self.video_res_key] + " videos")
+        if self.image_res_key:
+            parts.append(dict(IMAGE_RES_FILTERS)[self.image_res_key] + " photos")
+        if self.hdr_only:
+            parts.append("HDR")
         if self.place_filter is not None:
             parts.append(place_filter_name(self.place_filter) if self.place_filter else "no location")
         if self.size_filter_key:
@@ -4775,10 +4938,20 @@ class Pane(QWidget):
         if apply:
             exts = next(e for k, _l, e in FORMAT_FILTERS if k == self.format_filter_key)
             self.model.set_kind_filters(self.type_filter_key, exts, self.place_filter)
+            if self.res_filtering() and not self._specs_wired:
+                self._specs_wired = True
+                self.model.spec_of = self._spec_of
+                specs().ready.connect(self._specs_in, Qt.ConnectionType.QueuedConnection)
+            self.model.set_res_filters(self.video_res_key, self.image_res_key, self.hdr_only)
         if not hasattr(self, "type_menu"):
             return
         self.type_actions[self.type_filter_key].setChecked(True)
         self.format_actions[self.format_filter_key].setChecked(True)
+        self.video_res_actions[self.video_res_key].setChecked(True)
+        self.image_res_actions[self.image_res_key].setChecked(True)
+        self.hdr_action.setChecked(self.hdr_only)
+        self.video_res_menu.setTitle(f"Video Resolution: {dict(VIDEO_RES_FILTERS)[self.video_res_key]}")
+        self.image_res_menu.setTitle(f"Photo Resolution: {dict(IMAGE_RES_FILTERS)[self.image_res_key]}")
         self.type_menu.setTitle(f"Type: {dict(TYPE_FILTERS)[self.type_filter_key]}")
         self.format_menu.setTitle("Format: " + next(label for k, label, _e in FORMAT_FILTERS
                                                     if k == self.format_filter_key))
@@ -4788,7 +4961,7 @@ class Pane(QWidget):
         on = self.any_filter()
         self.clear_filters_act.setEnabled(on)
         self.filter_btn.setToolTip(f"Showing: {self.filter_summary()} — click to change" if on else
-                                   "Filter — type, format, location, size")
+                                   "Filter — type, format, resolution, HDR, location, size")
         self.filter_btn.setIcon(glyph("funnel", THEME.accent if on else THEME.secondary, 16))
         self._status_soon.start()
 
@@ -5835,7 +6008,7 @@ class Pane(QWidget):
                 c, arg = collection_of(self.location)
                 text = c.status(arg, n)
             if shown != n:
-                text += f" ({shown} shown — {self.filter_summary()})" if self.any_filter() else f" ({shown} shown)"
+                text += f" ({shown} shown — {self.filter_note()})" if self.any_filter() else f" ({shown} shown)"
             if self.scanner is not None:
                 text += " so far — still looking…"
             self.status.setText(text + tag_note)
@@ -5847,7 +6020,7 @@ class Pane(QWidget):
         free = self._free_space()
         text = f"{sel} of {n} selected{size_note}" if sel else f"{n} item{'s' if n != 1 else ''}"
         if self.any_filter() and shown != n:
-            text += f" ({shown} shown — {self.filter_summary()})"
+            text += f" ({shown} shown — {self.filter_note()})"
         self.status.setText(f"{text}, {human(free)} available{tag_note}")
         fs = MOUNTS.get(self._volume, "")
         self.fs_chip.setText(FS_NAMES.get(fs, fs))
@@ -7055,6 +7228,8 @@ class Pane(QWidget):
                 run = self.searches.get(self.location)
                 if self.scanner is not None:
                     title, detail = "Looking…", "Results appear here as they're found."
+                elif n and self.specs_left():
+                    title, detail = self._reading_sizes()
                 elif n and self.any_filter():
                     title, detail = "Nothing Matches the Filter", (f"{n:,} item{'s' if n != 1 else ''} hidden by "
                                                                     f"{self.filter_summary()}. Filter ▸ Show Everything brings them back.")
@@ -7081,10 +7256,17 @@ class Pane(QWidget):
             shown = self.model.rowCount(self.model.mapFromSource(root))
             if n == 0:
                 title, detail = "This Folder Is Empty", "Drop files here, or press ⇧⌘N for a new folder."
+            elif shown == 0 and self.specs_left():
+                title, detail = self._reading_sizes()
             elif shown == 0 and self.any_filter():
                 title, detail = "Nothing Matches the Filter", (f"{n:,} item{'s' if n != 1 else ''} hidden by "
                                                                 f"{self.filter_summary()}. Filter ▸ Show Everything brings them back.")
         self.empty_note.say(title, detail, THEME)
+
+    def _reading_sizes(self) -> tuple[str, str]:
+        left = self.specs_left()
+        return "Reading Resolutions…", (f"{left:,} still to read — what matches {self.filter_summary()} appears "
+                                        "here as it's found. Each file is read once and remembered.")
 
     def _confirm(self, title: str, text: str, detail: str) -> bool:
         box = QMessageBox(self.window())

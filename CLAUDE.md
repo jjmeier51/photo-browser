@@ -288,6 +288,12 @@ actions the app makes no network calls.
   Photo Browser for Mac's **funnel** holds the iPhone's **Type / Format / Location** filters beside Size (`Pane._filter_menu`;
   Location via `mac/places.py`, keyed like the iPhone so the drive's `.Photo Browser Metadata/places.json` names
   photos without asking again; new places through `mac/geocode_helper.swift`, CLGeocoder) — §6u.
+  It also holds the iPhone's **Video Resolution / Photo Resolution / HDR Only** filters (§6ay): same bands as
+  `VideoRes` / `ImageRes` (video by long side, photo by pixels; 12MP+ / 48MP+ are Mac extras), combined by
+  `photo_browser.res_passes` (= the iPhone's `passesAdvanced` — keep the two in step); numbers from
+  `media_info.spec` (header reads; ffprobe for WebM/MKV; None = unknown, never "Low-Res"), read off the window's
+  thread and kept by `specs()` (`_Facts(kind="spec", lookup_off_thread=True)`, keyed path + modified time); the
+  listing catches up on a timer (`Pane._specs_in`). Nothing is read until one of them is chosen.
   Photo Browser for Mac's **PDF viewer** (double-click a PDF; `mac/pdf_viewer.py`, QtPdf) has **Optimize for iPhone** (new
   "<name> (for iPhone).pdf": iPhone 17 Pro Max-shaped pages, margins trimmed, two-column pages read a column at a time,
   cut only between lines) and **Optimize for Mac** (trimmed pages, blanks dropped) — `mac/pdf_optimize.py`

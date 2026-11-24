@@ -872,13 +872,21 @@ iPhone too, and one you set on the iPhone is shown that way here.
   list view's Size column (and the folder's tooltip); "Calculate Folder Sizes" in the Sort menu turns
   it off. Sort by Size orders folders by what they hold. The status line shows the selection's size;
   the Move/Copy summary counts folders by it too.
-- **Filters — the iPhone app's Type, Format and Location, and Size.** The funnel button next to Sort
-  opens four submenus, each titled with what it's set to; they combine, apply to the listing or to search
+- **Filters — the iPhone app's Type, Format, Resolution, HDR and Location, and Size.** The funnel button next
+  to Sort opens a submenu for each, titled with what it's set to; they combine, apply to the listing or to search
   results and collections, and the status line says how many are shown and by what ("12 items (4 shown —
   photos · HEIF · Hauppauge, NY)"). **Show Everything** clears them. Type, Format and Size stay as you go
   from folder to folder; a Location is the folder's own and is cleared when you leave it.
   - **Type**: Photos, Videos or Screenshots (a PNG, or a photo with "screenshot" in its name) — as on the
     iPhone. **Format**: JPEG, PNG, HEIF, RAW, GIF, MOV, MP4 or AVI. Either one shows files only.
+  - **Video Resolution**: 4K (3840 pixels and up on the long side), 1080p, 720p or Low-Res. **Photo
+    Resolution**: 48MP+, 12MP+, 2MP+ or Low-Res (under 2 megapixels). **HDR Only**: HDR photos and videos. The
+    same bands as the iPhone app, combined the same way: one resolution alone shows only its kind, a video and
+    a photo resolution together show both, HDR narrows whatever is chosen; folders and other files are hidden
+    while any is on. Each file's size is read once, in the background, and remembered — the first time in a big
+    folder the status line counts down what's left ("reading 1,204 more…") and matches appear as they're found.
+    WebM and MKV videos need ffmpeg installed to be sized; a file whose size can't be read isn't shown by these
+    filters.
   - **Location**: opening it reads where the folder's photos and videos were taken, in the background, and
     lists each place with how many are from it ("Hauppauge, NY (3)", "Paris, France (1)") — most first, **No
     Location** last; folders stay listed. It uses the iPhone app's own place names wherever it can: the
