@@ -1609,7 +1609,7 @@ class MediaViewer(QWidget):
             h.addSpacing(5)
         self.fav_btn = _bar_button("", "Favorite (⇧⌘F) — the iPhone app's Favorites", lambda: self.toggle_label("favorite"),
                                    "heart")
-        self.del_btn = _bar_button("", "To Delete (⇧⌘X) — tags it “to-delete”, to go through later",
+        self.del_btn = _bar_button("", "To Delete (⌘D) — tags it “to-delete”, to go through later",
                                    self.toggle_to_delete, "bin")
         self.ai_btn = _bar_button("", "To AI (⇧⌘A) — the iPhone app's To AI", lambda: self.toggle_label("ai"), "sparkles")
         for b in (self.fav_btn, self.ai_btn):
@@ -1806,7 +1806,7 @@ class MediaViewer(QWidget):
                            ("=", lambda: self.zoom(1.25)), ("-", lambda: self.zoom(0.8)),
                            ("0", self.fit_current), ("Ctrl+Shift+F", lambda: self.toggle_label("favorite")),
                            ("Ctrl+Shift+A", lambda: self.toggle_label("ai")), ("Ctrl+Shift+X", self.toggle_to_delete),
-                           ("Ctrl+S", self.review_save), ("Ctrl+D", self.review_discard)):
+                           ("Ctrl+S", self.review_save), ("Ctrl+D", self._cmd_d)):
             sc = QShortcut(QKeySequence(keys), self)
             sc.activated.connect(slot)
 
@@ -2393,11 +2393,20 @@ class MediaViewer(QWidget):
         on = self._marked_to_delete()
         self.del_btn.setChecked(on)
         self.del_btn.setIcon(icon("bin.fill" if on else "bin", TO_DELETE_RED if on else "#F2F2F7"))
-        self.del_btn.setToolTip("Not To Delete (⇧⌘X) — takes the “to-delete” tag off" if on else
-                                "To Delete (⇧⌘X) — tags it “to-delete”, to go through later")
+        self.del_btn.setToolTip("Not To Delete (⌘D) — takes the “to-delete” tag off" if on else
+                                "To Delete (⌘D) — tags it “to-delete”, to go through later")
+
+    def _cmd_d(self) -> None:
+        """⌘D: the "to-delete" tag on the photo or video on show (again: off) — the bin beside ♡. On results that
+        aren't files yet (Edit / Create with AI's, with Save and Discard in the bar) it's Discard instead: there is
+        nothing to tag."""
+        if self._review_state():
+            self.review_discard()
+        else:
+            self.toggle_to_delete()
 
     def toggle_to_delete(self) -> None:
-        """⇧⌘X / the bin beside ♡: the "to-delete" tag on (or off) — nothing is deleted."""
+        """⌘D (⇧⌘X too) / the bin beside ♡: the "to-delete" tag on (or off) — nothing is deleted."""
         if self.hooks.set_to_delete is None or self.hooks.tags_of is None or not self.paths:
             return
         on = not self._marked_to_delete()

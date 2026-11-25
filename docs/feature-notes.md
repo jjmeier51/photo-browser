@@ -2123,6 +2123,12 @@ The guess reads only what the listing already holds (text, model, time): nothing
 a guess — two single edits sent with the same prompt seconds apart would be taken for a batch (right-click
 puts that right).
 
+**⌘D in the viewer (Nov 25, later):** asked for as the shortcut that tags the photo or video "to-delete". It
+now does (`MediaViewer._cmd_d` → `toggle_to_delete`, so a second press takes the tag off; ⇧⌘X still works; the
+bin's tooltip says ⌘D). On results that aren't files yet — the Save / Discard viewer above — ⌘D stays Discard:
+there's nothing to tag, and Discard is what it means there. The main window's ⌘D (Duplicate) is that window's
+own and doesn't fire while the viewer is in front.
+
 **Tested offscreen** (`ui2/t_aireview.py`, 45 checks; the earlier batch test still passes): the viewer's
 buttons through keep / discard / saved on one photo and on a batch, files and tags and metadata read back with
 ExifTool, Save not saving twice, the windows closing their viewers, the pending note, the recovery path, Info,
