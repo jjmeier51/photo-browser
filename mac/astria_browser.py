@@ -45,7 +45,9 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QCheckBox, QComboBox, QFileD
 
 import astria as A
 import search_query
-from ai_window import CLIENT, AIHooks, KeyRow, SettingsDialog, _door, _small, _style
+from ai_window import CLIENT, AIHooks, KeyRow, SettingsDialog, _door, _small, _style, decode_picture
+
+SHOWN_SIDE = 6000                 # the viewer reads a picture no larger than this a side (its true size is still said)
 
 AI_TAG = "AI"
 PAGE = 50                              # prompts asked for at a time
@@ -948,8 +950,8 @@ class BrowserWindow(QWidget):
         if not data:
             self.wanted.discard(key)                       # asked again the next time it's on screen
             return
-        img = QImage.fromData(data)
-        if img.isNull():
+        img, _size = decode_picture(data, 480)             # (the small copy, or — when that couldn't be made — the
+        if img.isNull():                                   #  whole download, read at tile size however big it is)
             return
         self.thumbs[key] = QPixmap.fromImage(img)
         while len(self.thumbs) > 1500:
@@ -1414,11 +1416,13 @@ class ViewerWindow(QWidget):
                 self.picture.show_pixmap(None, "The picture couldn't be loaded.")
 
     def _show(self, data: bytes) -> None:
-        img = QImage.fromData(data)
+        # Read at up to SHOWN_SIDE a side (a 4K picture whole; an 8K one at half — far past any screen), and its
+        # own size said beside it. `QImage.fromData` alone hands back nothing for a picture over Qt's 256 MB.
+        img, size = decode_picture(data, SHOWN_SIDE)
         if img.isNull():
             self.picture.show_pixmap(None, "The picture couldn't be shown.")
             return
-        self._meta(img.width(), img.height(), len(data))
+        self._meta(size.width() or img.width(), size.height() or img.height(), len(data))
         self.picture.show_pixmap(QPixmap.fromImage(img))
 
     def _meta(self, w: int = 0, h: int = 0, size: int = 0) -> None:

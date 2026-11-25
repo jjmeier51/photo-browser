@@ -269,6 +269,9 @@ actions the app makes no network calls.
   (`ai_prompt`, `ai_model`) for the viewer's Info. A done job's pending note is dropped once every result is
   saved or left out. **A batch's prompts are bulk** (`Job.bulk` → `astria.note_bulk`; older runs guessed by
   `bulk_guess`; `set_bulk` = the person's word) and the Astria.ai Browser's **Hide Bulk Edits** leaves them out.
+  **Never `QImage.fromData` a result** (§6bd): Qt silently returns nothing for a picture over 256 MB decoded (a 4K
+  result with Upscale 2× is 11008×6144) — use `ai_window.decode_picture(data, max_side)` (ceiling raised, read at
+  size, Pillow fallback); result tiles make their pictures off the window's thread.
   **Several photos, one prompt** (select photos ▸ Edit N Photos with AI…): a job per photo with the same prompt and
   settings, four at a time (`ai_window.LANES`), one `BatchResultsWindow` with every photo's results, Save All once
   they're all back (each into the "AI" folder beside its own photo), Try Again per failed photo. Photo Browser for Mac only.

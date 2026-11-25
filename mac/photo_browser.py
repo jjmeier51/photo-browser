@@ -10620,6 +10620,12 @@ def main() -> None:
         f.setFamily("Inter")
         f.setPointSizeF(10)
         app.setFont(f)
+    try:                                 # Qt refuses a picture over 256 MB once decoded (an 8K result, a big
+        from PySide6.QtGui import QImageReader           # panorama) and hands back nothing: let it read them
+        if 0 < QImageReader.allocationLimit() < 4096:
+            QImageReader.setAllocationLimit(4096)
+    except (ImportError, AttributeError):
+        pass
     global THUMBS
     THUMBS = Thumbnails()
     prune_thumbs_later()                 # the thumbnail folder kept to its size (once a day, in the background)

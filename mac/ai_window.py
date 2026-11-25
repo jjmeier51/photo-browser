@@ -35,9 +35,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSettings, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QImage, QPainter,
-                           QPainterPath, QPen, QPixmap)
+from PySide6.QtCore import (QBuffer, QByteArray, QIODevice, QObject, QPoint, QRect, QRectF, QSettings, QSize, Qt, QTimer,
+                            QUrl, Signal)
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QImage, QImageReader,
+                           QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QToolButton,
@@ -99,12 +100,76 @@ def _small(text: str, wrap: bool = True) -> QLabel:
     return lab
 
 
-def _thumb_of(data: bytes, side: int) -> QPixmap | None:
-    img = QImage.fromData(data)
+BIG_PICTURES_MB = 4096           # Qt's own ceiling on a decoded picture is 256 MB — under an 8K result's size
+
+
+def allow_big_pictures() -> None:
+    """Lets Qt decode very large pictures. By default it refuses any that would take over 256 MB once decoded —
+    which a 4K result enlarged 2× (11008 × 6144) does — and hands back nothing, with no error: a blank tile."""
+    try:
+        if 0 < QImageReader.allocationLimit() < BIG_PICTURES_MB:
+            QImageReader.setAllocationLimit(BIG_PICTURES_MB)
+    except (AttributeError, TypeError):
+        pass                                   # an older Qt has no such ceiling
+
+
+def decode_picture(data: bytes, max_side: int = 0) -> tuple[QImage, QSize]:
+    """(the picture, its own size in pixels) from a result's bytes — upright, and when `max_side` is given read
+    *at about that size* rather than whole (a JPEG is decoded small, in a fraction of the time and memory: what a
+    thumbnail of an 8K picture needs). Qt first; Pillow when Qt can't (a kind it has no reader for, or one it still
+    refuses). A null image when neither can — safe on any thread."""
+    allow_big_pictures()
+    buf = QBuffer()
+    buf.setData(QByteArray(data))
+    buf.open(QIODevice.OpenModeFlag.ReadOnly)
+    reader = QImageReader(buf)
+    reader.setAutoTransform(True)
+    full = reader.size()
+    if max_side and full.isValid() and max(full.width(), full.height()) > max_side:
+        reader.setScaledSize(full.scaled(max_side, max_side, Qt.AspectRatioMode.KeepAspectRatio))
+    img = reader.read()
+    if not img.isNull():
+        try:
+            turned = bool(reader.transformation().value & 4)                # a quarter turn: the size as it's shown
+        except (AttributeError, TypeError):
+            turned = False
+        if full.isValid() and turned:
+            full = full.transposed()
+        return img, full if full.isValid() else img.size()
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(io.BytesIO(data)) as im:
+            im = ImageOps.exif_transpose(im)
+            size = QSize(*im.size)
+            if max_side and max(im.size) > max_side:
+                im.thumbnail((max_side, max_side))
+            im = im.convert("RGBA")
+            raw = im.tobytes()
+            return QImage(raw, im.width, im.height, im.width * 4, QImage.Format.Format_RGBA8888).copy(), size
+    except Exception:  # noqa: BLE001 — not a picture anything here can read
+        return QImage(), QSize()
+
+
+def _thumb_image(data: bytes, side: int) -> QImage:
+    img, _size = decode_picture(data, side * 2)
     if img.isNull():
-        return None
-    return QPixmap.fromImage(img.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatio,
-                                        Qt.TransformationMode.SmoothTransformation))
+        return img
+    return img.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+
+def _thumb_of(data: bytes, side: int) -> QPixmap | None:
+    img = _thumb_image(data, side)
+    return None if img.isNull() else QPixmap.fromImage(img)
+
+
+_THUMBS_POOL: ThreadPoolExecutor | None = None
+
+
+def _thumbs_pool() -> ThreadPoolExecutor:
+    global _THUMBS_POOL
+    if _THUMBS_POOL is None:
+        _THUMBS_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ai-thumb")
+    return _THUMBS_POOL
 
 
 def _style(theme) -> str:
@@ -893,15 +958,35 @@ class _Result(QWidget):
     """One result: kept unless clicked (then a red ✕); double-click to see it full size."""
     toggled = Signal()
     opened = Signal(int)
+    _pictured = Signal(QImage)
 
     def __init__(self, i: int, data: bytes, side: int, parent=None) -> None:
         super().__init__(parent)
         self.i, self.data, self.keep = i, data, True
         self.saved_to = ""                              # where it was saved, once it has been (from the viewer, or Save)
-        self.pm = _thumb_of(data, side)
+        # The tile's picture is made off the window's thread: a 4K or 8K result (a PNG above all) takes a second
+        # or more to read, and a window of them used to stand still for all of it.
+        self.pm: QPixmap | None = None
+        self.unreadable = False
+        self._pictured.connect(self._got_picture)
+
+        def work() -> None:
+            img = _thumb_image(data, side)
+            try:
+                self._pictured.emit(img)
+            except RuntimeError:                        # the window closed meanwhile
+                pass
+        _thumbs_pool().submit(work)
         self.setFixedSize(side, side)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Click to throw this one away (click again to keep it); double-click to see it full size")
+
+    def _got_picture(self, img: QImage) -> None:
+        if img.isNull():
+            self.unreadable = True
+        else:
+            self.pm = QPixmap.fromImage(img)
+        self.update()
 
     def mousePressEvent(self, e) -> None:  # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton and not self.saved_to:
@@ -943,6 +1028,10 @@ class _Result(QWidget):
             if not self.keep:
                 p.fillRect(r, QColor(0, 0, 0, 120))
             p.restore()
+        else:                                           # still being read — or a kind nothing here can draw
+            p.setPen(QColor("#8E8E93"))
+            p.drawText(r.adjusted(10, 0, -10, 0), Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                       "Can't be previewed here —\nit will still save" if self.unreadable else "Loading…")
         d = 30
         ring = QRectF(self.width() - d - 8, 8, d, d)
         p.setPen(QPen(QColor("white"), 2))
