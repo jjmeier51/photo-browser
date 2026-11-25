@@ -2254,6 +2254,34 @@ Tested offscreen: the 11008×6144 JPEG and an 8192×8192 PNG that Qt alone refus
 picture; non-pictures; the Pillow fallback; the results window up in 0.15 s with four huge results; the browser's
 grid and viewer. Not run on a Mac, and not against real Nano Banana 2 output.
 
+## 6bd-2. Mac viewer: D tags "to-delete"; ⌘ keys no longer go to the main window's menu (Nov 25, 2026)
+
+**Reported:** ⌘D in the viewer "is only duplicating, not adding tags" — and asked for the plain **D** key
+instead.
+
+**D** now does it: `("D", self._cmd_d)` in `MediaViewer._shortcuts` — the "to-delete" tag on the photo or video
+on show, off again on a second press (in Clean Up it's that screen's Delete; on unsaved AI results, Discard).
+The bin's tooltip says D.
+
+**Why ⌘D duplicated** — and what else that meant. I'd assumed a window's own shortcut wins over the menu bar.
+On a Mac it's the other way round: for a ⌘ key AppKit asks the **menu bar** first, and Qt lets a menu item's key
+through to the window only if whatever has the keyboard there *accepts a ShortcutOverride* for it (Qt's menu
+delegate, `menuHasKeyEquivalent`). A `QShortcut` doesn't count. So with the viewer in front, ⌘D ran File ▸
+Duplicate on the main window's selection — which follows the viewer, so it duplicated the very file on show —
+and never reached the viewer. The same was true of every ⌘ key the two share: **⌘Z** in Clean Up would have run
+the main window's Undo (taking back some earlier move or rename) instead of taking back an answer; **⌘⌫** went to
+the main window's Move to Trash; ⌘T, ⇧⌘F/A/X only looked right because the menu's version acted on the same file.
+
+**Fix:** `MediaViewer.event` accepts the ShortcutOverride for each of its ⌘ shortcuts (`_cmd_keys`, filled by
+`_shortcuts`) and runs the slot itself — once per press (the menu bar and then the key can each ask; a held
+key's repeats are ignored). The override reaches the window from whichever widget in it has the keyboard, or
+from the window itself when none has. So ⌘D now tags and no longer duplicates; ⌘Z, ⌘S, ⌘T, ⌘⌫, ⇧⌘F/A/X are the
+viewer's own while it's in front.
+
+Tested offscreen: D on a photo and a video; a ShortcutOverride for ⌘D sent to the viewer (twice, as a Mac does)
+tags once and is accepted; ⌘Z in Clean Up; keys the viewer doesn't own aren't claimed. **The menu bar's side of
+this is macOS's and couldn't be run here** — if ⌘D still duplicates on the Mac, D is unaffected by any of it.
+
 ## 6w-3. Make Book: pictures beside the text, placed and sized freely, on a live page — `mac/bookify.py`, `mac/book_pictures.py` (Nov 23, 2026)
 
 **Asked for:** "allowing the user to embed pictures next to text/paragraphs. Give the user full autonomy as to

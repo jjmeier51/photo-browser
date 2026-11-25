@@ -524,8 +524,12 @@ written through `simpcity.ExifPool`, saves every 60 s — §7.4b-3. (`SimpCitySe
   (§7.4h-2, §7.4h-3). **Most profiles have no hub and the run must reach their photos anyway** (§7.4h-4): the hub
   is a choice (`Options.exclusive` ← the "Exclusive content" box), `_hub` returns None for "none" (kept in the
   record's `hub`, not looked for again for `HUB_RECHECK`), a guessed address is looked at before it's scrolled
-  (Facebook serves the plain profile under some), and no error or wall inside the pass ends the run. **To Delete** (beside Favorite: viewer bin, right-click, Photos menu, ⇧⌘X; **⌘D in the viewer** —
-  `MediaViewer._cmd_d`, which is Discard instead on unsaved AI results) = the **"to-delete" tag**
+  (Facebook serves the plain profile under some), and no error or wall inside the pass ends the run. **To Delete** (beside Favorite: viewer bin, right-click, Photos menu, ⇧⌘X; **D in the viewer** (⌘D too) —
+  `MediaViewer._cmd_d`, which is Discard instead on unsaved AI results) = the **"to-delete" tag**.
+  **The viewer claims its ⌘ keys from the menu bar** (`MediaViewer.event`: ShortcutOverride accepted for
+  `_cmd_keys`, the slot run there, once per press) — on a Mac the main window's menu gets a ⌘ key first, so ⌘D
+  duplicated the file behind the viewer and ⌘Z would have undone something in the main window; any new ⌘ key in
+  the viewer goes through `_shortcuts` so it's claimed too (§6bd-2)
   (`TO_DELETE_TAG`, `Pane.set_to_delete`, undoable; red bin mark on tiles) — nothing is deleted by it. §7.4h.
 - **Set Dates from File Names / Restore Capture Dates (Mac, Nov 16)** — right-click ▸ Dates ▸ … / Photos menu
   (`mac/name_dates.py`, `mac/name_dates_window.py`): the date in a name (`name_2026_11_16_<id>`, camera names,

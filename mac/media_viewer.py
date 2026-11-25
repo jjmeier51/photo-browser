@@ -1658,7 +1658,7 @@ class MediaViewer(QWidget):
             h.addSpacing(5)
         self.fav_btn = _bar_button("", "Favorite (⇧⌘F) — the iPhone app's Favorites", lambda: self.toggle_label("favorite"),
                                    "heart")
-        self.del_btn = _bar_button("", "To Delete (⌘D) — tags it “to-delete”, to go through later",
+        self.del_btn = _bar_button("", "To Delete (D) — tags it “to-delete”, to go through later",
                                    self.toggle_to_delete, "bin")
         self.ai_btn = _bar_button("", "To AI (⇧⌘A) — the iPhone app's To AI", lambda: self.toggle_label("ai"), "sparkles")
         for b in (self.fav_btn, self.ai_btn):
@@ -1844,6 +1844,8 @@ class MediaViewer(QWidget):
         return panel
 
     def _shortcuts(self) -> None:
+        self._cmd_keys: dict[str, Callable] = {}
+        self._cmd_last: tuple = ("", 0.0)
         for keys, slot in (("Left", lambda: self._nav(-1)), ("Right", lambda: self._nav(1)), ("Escape", self._escape),
                            ("Down", self.close), ("Up", self.toggle_info), ("I", self.toggle_info),
                            ("F", self._key_f), ("S", self.toggle_slideshow), ("Space", self._space),
@@ -1861,9 +1863,35 @@ class MediaViewer(QWidget):
                            ("X", lambda: self.triage_answer("delete")), ("1", lambda: self.triage_answer("delete")),
                            ("K", lambda: self.triage_answer("keep")), ("2", lambda: self.triage_answer("keep")),
                            ("H", lambda: self.triage_answer("favorite")), ("3", lambda: self.triage_answer("favorite")),
-                           ("Ctrl+Z", self.triage_undo)):
+                           ("Ctrl+Z", self.triage_undo),
+                           ("D", self._cmd_d)):                  # To Delete (the bin beside ♡) — a key of its own
             sc = QShortcut(QKeySequence(keys), self)
             sc.activated.connect(slot)
+            if "Ctrl+" in keys:
+                self._cmd_keys[QKeySequence(keys).toString()] = slot
+        # The ⌘ keys above are also the main window's menu commands (⌘D Duplicate, ⌘Z Undo, ⌘⌫ Move to Trash,
+        # ⌘T Tags…) — and on a Mac the menu bar is asked first: with the viewer in front, ⌘D *duplicated the file*
+        # in the window behind and never reached the viewer. Qt only keeps a key from the menu when the window in
+        # front claims it (a ShortcutOverride accepted — it reaches the window from whatever has the keyboard in
+        # it), so the viewer claims its own and acts on them itself (`event`).
+
+    def event(self, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.ShortcutOverride and self._cmd_keys:
+            try:
+                seq = QKeySequence(event.keyCombination()).toString()
+            except (AttributeError, TypeError):
+                seq = ""
+            slot = self._cmd_keys.get(seq)
+            if slot is not None:
+                event.accept()                                # ours: not the menu bar's, not another shortcut's
+                now = time.monotonic()
+                # One press can ask twice (the menu bar, then the key itself), and a held key repeats: once each.
+                again = self._cmd_last[0] == seq and now - self._cmd_last[1] < 0.1
+                if not event.isAutoRepeat() and not again:
+                    self._cmd_last = (seq, now)
+                    QTimer.singleShot(0, slot)
+                return True
+        return super().event(event)
 
     # ------------------------------------------------------------------ showing an item
     @property
@@ -2467,11 +2495,11 @@ class MediaViewer(QWidget):
         on = self._marked_to_delete()
         self.del_btn.setChecked(on)
         self.del_btn.setIcon(icon("bin.fill" if on else "bin", TO_DELETE_RED if on else "#F2F2F7"))
-        self.del_btn.setToolTip("Not To Delete (⌘D) — takes the “to-delete” tag off" if on else
-                                "To Delete (⌘D) — tags it “to-delete”, to go through later")
+        self.del_btn.setToolTip("Not To Delete (D) — takes the “to-delete” tag off" if on else
+                                "To Delete (D) — tags it “to-delete”, to go through later")
 
     def _cmd_d(self) -> None:
-        """⌘D: the "to-delete" tag on the photo or video on show (again: off) — the bin beside ♡. On results that
+        """D (and ⌘D): the "to-delete" tag on the photo or video on show (again: off) — the bin beside ♡. On results that
         aren't files yet (Edit / Create with AI's, with Save and Discard in the bar) it's Discard instead: there is
         nothing to tag. In Clean Up it's that screen's Delete."""
         if self.hooks.triage is not None:

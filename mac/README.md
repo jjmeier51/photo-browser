@@ -1423,7 +1423,7 @@ down at the first sign it doesn't.
 
 ### To Delete
 
-Beside the ♡ in the viewer there's a bin: click it (or press **⌘D** — ⇧⌘X works too) to tag the photo or video **to-delete**; press it again to take the tag off. It
+Beside the ♡ in the viewer there's a bin: click it (or press **D** — ⌘D and ⇧⌘X work too) to tag the photo or video **to-delete**; press it again to take the tag off. It
 turns red, and the item's tile gets a small red bin next to its heart. In the main window it's under Favorite in
 the right-click menu and in the Photos menu (⇧⌘X too), for everything selected; Undo (⌘Z) takes it back. Nothing is
 deleted — it's a tag, so you can go through them later (sidebar ▸ Tags ▸ to-delete) and delete them then. The
