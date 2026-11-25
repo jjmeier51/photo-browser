@@ -59,6 +59,7 @@ class AIHooks:
     carry_tags: Callable[[list[tuple[str, str]]], None] | None = None   # [(original, new)]
     reveal: Callable[[str], None] | None = None
     view: Callable[[list[str], str], None] | None = None
+    review: Callable[[list[str], str, object], object] | None = None    # (files, start, media_viewer.Review) → the viewer
     keep_open: Callable[[QWidget], None] | None = None                  # Photo Browser for Mac holds the window
     add_tags: Callable[[list[str], list[str]], None] | None = None      # (files, tags): tag them
     create: Callable[[dict], None] | None = None                        # open Create with AI filled in
@@ -259,10 +260,18 @@ class Job:
     references: list[str] = field(default_factory=list)
     settings: dict = field(default_factory=dict)   # the form, for Run Again
     upscale: bool = False                          # "Upscale results 2×": each result enlarged (Lanczos) as it arrives
+    bulk: bool = False                             # one of several photos sent with the same prompt (a batch run)
     images: list[bytes] = field(default_factory=list)
     error: A.AIError | None = None
     note: str = ""
     done: bool = False
+
+
+def said_prompt(job: "Job") -> str:
+    """The prompt as the person typed it — what's written into a saved result's metadata ("AI-generated · Prompt:
+    …", as the iPhone app writes it). The text as sent (model prefix, negative prompt) only when the form's isn't
+    there."""
+    return str(job.settings.get("prompt") or "").strip() or job.prompt
 
 
 def _tag_upscaled(hooks, job: "Job", paths: list[str]) -> None:
@@ -326,7 +335,10 @@ class Jobs(QObject):
             def on_prompt(pid: int) -> None:
                 A.note_pending({"job": job.id, "prompt_id": pid, "tune": job.gen.tune_id, "count": job.count,
                                 "source": job.source, "folder": job.folder, "model": job.model_label,
-                                "prompt": job.prompt, "started": time.time(), "upscale": job.upscale})
+                                "prompt": job.prompt, "said": said_prompt(job), "started": time.time(),
+                                "upscale": job.upscale})
+                if job.bulk:
+                    A.note_bulk(pid)                 # (the Astria.ai Browser can leave a batch's prompts out)
 
             def beat(ready: int, want: int | None) -> None:
                 self.progress.emit(job.id, f"Astria is working on it — {ready} of {want or job.count} ready…"
@@ -885,22 +897,35 @@ class _Result(QWidget):
     def __init__(self, i: int, data: bytes, side: int, parent=None) -> None:
         super().__init__(parent)
         self.i, self.data, self.keep = i, data, True
+        self.saved_to = ""                              # where it was saved, once it has been (from the viewer, or Save)
         self.pm = _thumb_of(data, side)
         self.setFixedSize(side, side)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Click to throw this one away (click again to keep it); double-click to see it full size")
 
     def mousePressEvent(self, e) -> None:  # noqa: N802
-        if e.button() == Qt.MouseButton.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton and not self.saved_to:
             self.keep = not self.keep
             self.update()
             self.toggled.emit()
 
     def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
-        self.keep = not self.keep                       # the double-click's first click doesn't count
-        self.update()
-        self.toggled.emit()
+        if not self.saved_to:
+            self.keep = not self.keep                   # the double-click's first click doesn't count
+            self.update()
+            self.toggled.emit()
         self.opened.emit(self.i)
+
+    def set_keep(self, keep: bool) -> None:
+        if not self.saved_to and keep != self.keep:
+            self.keep = keep
+            self.update()
+            self.toggled.emit()
+
+    def mark_saved(self, path: str) -> None:
+        self.saved_to, self.keep = path, True
+        self.setToolTip(f"Saved as “{os.path.basename(path)}” — double-click to see it full size")
+        self.update()
 
     def paintEvent(self, _e) -> None:  # noqa: N802
         p = QPainter(self)
@@ -921,7 +946,7 @@ class _Result(QWidget):
         d = 30
         ring = QRectF(self.width() - d - 8, 8, d, d)
         p.setPen(QPen(QColor("white"), 2))
-        p.setBrush(QColor("#30D158") if self.keep else QColor("#FF453A"))
+        p.setBrush(QColor("#0A84FF") if self.saved_to else QColor("#30D158") if self.keep else QColor("#FF453A"))
         p.drawEllipse(ring)
         p.setPen(QPen(QColor("white"), 2.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         c = ring.center()
@@ -941,7 +966,80 @@ class _Result(QWidget):
             f.setWeight(QFont.Weight.DemiBold)
             p.setFont(f)
             p.drawText(r, Qt.AlignmentFlag.AlignCenter, "Won't be saved")
+        elif self.saved_to:
+            f = QFont(self.font())
+            f.setWeight(QFont.Weight.DemiBold)
+            p.setFont(f)
+            band = QRectF(0, self.height() - 26, self.width(), 26)
+            p.save()
+            p.setClipPath(path)
+            p.fillRect(band, QColor(0, 0, 0, 150))
+            p.restore()
+            p.setPen(QColor("white"))
+            p.drawText(band, Qt.AlignmentFlag.AlignCenter, "Saved")
         p.end()
+
+
+class _Reviewed:
+    """What a results window needs to let its results be saved or discarded from the full-size viewer: the
+    temporary copies it showed (file → tile), the viewers it opened, and the `media_viewer.Review` it hands them.
+    The window supplies `_save_tile(tile) -> str` (the saved file; raises OSError / ValueError) and
+    `_tile_saved(tile, path)` (tags, counts)."""
+
+    def _review_init(self) -> None:
+        self._shown: dict[str, _Result] = {}
+        self._viewers: list = []
+        self._gone = False
+
+    def _review(self):
+        import media_viewer
+
+        def state(path: str) -> str:
+            t = self._shown.get(path)
+            if t is None or self._gone:
+                return ""
+            return "saved" if t.saved_to else "keep" if t.keep else "discard"
+
+        def save(path: str) -> str:
+            t = self._shown.get(path)
+            if t is None or self._gone or t.saved_to:
+                return ""
+            try:
+                out = self._save_tile(t)
+            except (OSError, ValueError) as e:
+                raise RuntimeError(str(e)) from e
+            t.mark_saved(out)
+            self._tile_saved(t, out)
+            return f"Saved as “{os.path.basename(out)}” in “{os.path.basename(os.path.dirname(out))}”."
+
+        def discard(path: str, leave: bool) -> None:
+            t = self._shown.get(path)
+            if t is not None and not self._gone:
+                t.set_keep(not leave)
+
+        return media_viewer.Review(state=state, save=save, discard=discard)
+
+    def _view(self, paths: list[str], start: str) -> None:
+        """The viewer on the results' temporary copies — with Save / Discard there when Photo Browser offers it."""
+        hooks = self.hooks
+        if getattr(hooks, "review", None) is not None:
+            viewer = hooks.review(paths, start, self._review())
+            if viewer is not None:
+                self._viewers.append(viewer)
+        elif hooks.view is not None:
+            hooks.view(paths, start)
+        else:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(start))
+
+    def _review_closed(self) -> None:
+        """The window is going: its viewers (temporary copies of results now saved or dropped) go with it."""
+        self._gone = True
+        for v in self._viewers:
+            try:
+                v.close()
+            except RuntimeError:                      # closed by hand already
+                pass
+        self._viewers.clear()
 
 
 def _unsaved_before_run_again(parent: QWidget, count: int) -> str:
@@ -972,11 +1070,12 @@ def _unsaved_before_run_again(parent: QWidget, count: int) -> str:
     return answer
 
 
-class ResultsWindow(QWidget):
+class ResultsWindow(_Reviewed, QWidget):
     def __init__(self, job: Job, hooks: AIHooks, theme, parent=None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.job, self.hooks, self.theme = job, hooks, theme
+        self._review_init()
         self.saved: list[str] = []
         self.failed = 0                 # results the last Save couldn't write (the window stays open for them)
         self._settled = False           # closing after Save / Run Again: nothing left to ask
@@ -1054,7 +1153,8 @@ class ResultsWindow(QWidget):
             self.summary.setText("")
             return
         self.state.setText(job.note or f"{len(job.images)} result{'s' if len(job.images) != 1 else ''} — "
-                           "click one to leave it out, double-click to see it full size.")
+                           "click one to leave it out; double-click to see it full size, and save or discard it "
+                           "there.")
         side = 260
         for i, data in enumerate(job.images):
             t = _Result(i, data, side, self.body)
@@ -1065,17 +1165,24 @@ class ResultsWindow(QWidget):
         self._update()
 
     def _update(self) -> None:
-        keep = sum(1 for t in self.tiles if t.keep)
-        if self.saved:
+        keep = sum(1 for t in self.tiles if t.keep and not t.saved_to)
+        done = [t.saved_to for t in self.tiles if t.saved_to]
+        self.saved = done
+        self.show_btn.setVisible(bool(done) and self.hooks.reveal is not None)
+        where = "the “AI” folder beside the photo" if self.job.mode == "edit" else \
+            f"“{os.path.basename(self.job.folder)}/AI”"
+        if done and not keep:                                 # everything kept is on the drive (some from the viewer)
+            self.save_btn.setText("Saved")
+            self.save_btn.setEnabled(False)
+            self.summary.setText(f"Saved {len(done)} into “{os.path.basename(os.path.dirname(done[0]))}”.")
             return
         self.save_btn.setText(f"Save {keep}" if keep else "Save")
         self.save_btn.setEnabled(keep > 0)
-        where = "the “AI” folder beside the photo" if self.job.mode == "edit" else \
-            f"“{os.path.basename(self.job.folder)}/AI”"
-        self.summary.setText(f"{keep} of {len(self.tiles)} kept — saved into {where}." if self.tiles else "")
+        self.summary.setText((f"{keep} of {len(self.tiles)} kept — saved into {where}."
+                              + (f" {len(done)} already saved." if done else "")) if self.tiles else "")
 
     def _open(self, i: int) -> None:
-        """Full size: through the viewer, from a temporary copy."""
+        """Full size: through the viewer, from a temporary copy — where each can be saved or discarded."""
         tmp = Path(tempfile.gettempdir()) / "PhotoBrowserAI" / self.job.id
         tmp.mkdir(parents=True, exist_ok=True)
         paths = []
@@ -1084,22 +1191,29 @@ class ResultsWindow(QWidget):
             if not p.exists():
                 p.write_bytes(t.data)
             paths.append(str(p))
-        if self.hooks.view is not None:
-            self.hooks.view(paths, paths[i])
-        else:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(paths[i]))
+            self._shown[str(p)] = t
+        self._view(paths, paths[i])
+
+    def _save_tile(self, t: _Result) -> str:
+        """One result onto the drive, with the prompt and the model in its metadata. Raises OSError / ValueError."""
+        if self.job.mode == "edit":
+            return A.save_edit(t.data, self.job.source, self.job.model_label, said_prompt(self.job))
+        return A.save_created(t.data, self.job.folder, self.job.model_label, said_prompt(self.job))
+
+    def _tile_saved(self, t: _Result, path: str) -> None:
+        """A result saved by itself (from the viewer): its tags, and the window's counts."""
+        if self.job.mode == "edit" and self.hooks.carry_tags is not None:
+            self.hooks.carry_tags([(self.job.source, path)])
+        _tag_upscaled(self.hooks, self.job, [path])
+        self._update()
 
     def save(self) -> list[str]:
         out, failed = [], 0
         for t in self.tiles:
-            if not t.keep or getattr(t, "saved_to", ""):          # (one saved on an earlier try isn't saved twice)
+            if not t.keep or t.saved_to:                          # (one saved already — here or in the viewer — isn't saved twice)
                 continue
             try:
-                if self.job.mode == "edit":
-                    t.saved_to = A.save_edit(t.data, self.job.source, self.job.model_label, self.job.settings.get("prompt", ""))
-                else:
-                    t.saved_to = A.save_created(t.data, self.job.folder, self.job.model_label,
-                                                self.job.settings.get("prompt", ""))
+                t.mark_saved(self._save_tile(t))
                 out.append(t.saved_to)
             except (OSError, ValueError) as e:
                 failed += 1
@@ -1109,8 +1223,8 @@ class ResultsWindow(QWidget):
         _tag_upscaled(self.hooks, self.job, out)
         if not failed:
             A.drop_pending(self.job.id)                      # only once every kept result is on the drive: they were paid for
-        out = [t.saved_to for t in self.tiles if getattr(t, "saved_to", "")]
-        self.saved = out if not failed else []               # (still "unsaved" while any couldn't be written)
+        out = [t.saved_to for t in self.tiles if t.saved_to]
+        self.saved = out
         self.failed = failed
         self.save_btn.setEnabled(bool(failed))
         self.save_btn.setText("Try Saving Again" if failed else "Saved")
@@ -1131,7 +1245,7 @@ class ResultsWindow(QWidget):
             self.close()
 
     def _unsaved(self) -> list:
-        return [t for t in self.tiles if t.keep] if not self.saved else []
+        return [t for t in self.tiles if t.keep and not t.saved_to]
 
     def run_again(self) -> None:
         """The form as it was, in place of these results: the window closes. Kept results that weren't saved are
@@ -1180,11 +1294,16 @@ class ResultsWindow(QWidget):
                 return
         elif not self.job.done:
             pass                                          # still running: the job finishes and is kept for later
+        elif self.tiles:
+            # Every result was dealt with — saved, or left out on purpose: nothing of this job is fetched again
+            # (its note was only dropped by Save before, so results thrown away came back at the next launch).
+            A.drop_pending(self.job.id)
         try:
             jobs().progress.disconnect(self._progress)
             jobs().finished.disconnect(self._finished)
         except (RuntimeError, TypeError):
             pass
+        self._review_closed()
         super().closeEvent(event)
 
 
@@ -1227,7 +1346,7 @@ class _PhotoSection(QFrame):
         self.side = side
 
 
-class BatchResultsWindow(QWidget):
+class BatchResultsWindow(_Reviewed, QWidget):
     """Edit with AI on several photos: one window for all of them. Each photo is its own generation on Astria
     (the same prompt and settings); they're sent a few at a time and their results appear under each photo as
     they arrive. **Save** is for the whole batch — offered once every photo has come back (or failed) — and
@@ -1238,6 +1357,9 @@ class BatchResultsWindow(QWidget):
         super().__init__(parent, Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.batch, self.hooks, self.theme = list(batch), hooks, theme
+        self._review_init()
+        for job in self.batch:
+            job.bulk = True                              # (their prompts can be left out of the Astria.ai Browser)
         self.saved: list[str] = []
         self.failed = 0
         self._settled = False           # closing after Save All / Run Again: nothing left to ask
@@ -1372,11 +1494,13 @@ class BatchResultsWindow(QWidget):
         done = sum(1 for j in self.batch if j.done)
         failed = sum(1 for j in self.batch if j.done and j.error is not None and not j.images)
         got = self.tiles()
-        keep = sum(1 for _j, t in got if t.keep)
+        keep = sum(1 for _j, t in got if t.keep and not t.saved_to)
+        early = [t.saved_to for _j, t in got if t.saved_to]
         self.bar.setValue(done)
         n = len(self.batch)
         if self.saved:
             return
+        self.show_btn.setVisible(bool(early) and self.hooks.reveal is not None)
         if done < n:
             self.state.setText(f"{done} of {n} photos back" + (f" · {failed} couldn't be done" if failed else "")
                                + " — the results are saved together once they're all in.")
@@ -1392,10 +1516,18 @@ class BatchResultsWindow(QWidget):
             return
         self.state.setText(f"All {n} photos are back" + (f" — {failed} couldn't be done (Try Again beside "
                            f"{'it' if failed == 1 else 'them'})." if failed else ".")
-                           + " Click a result to leave it out, double-click to see it full size.")
+                           + " Click a result to leave it out; double-click to see it full size, and save or "
+                             "discard it there.")
+        if early and not keep:                                # everything kept was saved one by one, in the viewer
+            self.save_btn.setText("Saved")
+            self.save_btn.setEnabled(False)
+            self.summary.setText(f"Saved {len(early)} result{'s' if len(early) != 1 else ''}, each into the “AI” "
+                                 "folder beside its photo.")
+            return
         self.save_btn.setText(f"Save All {keep}" if keep else "Save All")
         self.save_btn.setEnabled(keep > 0)
-        self.summary.setText(f"{keep} of {len(got)} kept — each saved into the “AI” folder beside its photo.")
+        self.summary.setText(f"{keep} of {len(got)} kept — each saved into the “AI” folder beside its photo."
+                             + (f" {len(early)} already saved." if early else ""))
 
     def _open(self, tile: _Result) -> None:
         """Full size, through the viewer: every result of the batch, in order, from temporary copies."""
@@ -1407,12 +1539,26 @@ class BatchResultsWindow(QWidget):
             if not p.exists():
                 p.write_bytes(t.data)
             paths.append(str(p))
+            self._shown[str(p)] = t
+            t.job = job
             if t is tile:
                 start = str(p)
-        if self.hooks.view is not None and start:
-            self.hooks.view(paths, start)
-        elif start:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(start))
+        if start:
+            self._view(paths, start)
+
+    def _save_tile(self, t: _Result) -> str:
+        job = t.job
+        return A.save_edit(t.data, job.source, job.model_label, said_prompt(job))
+
+    def _tile_saved(self, t: _Result, path: str) -> None:
+        """A result saved by itself (from the viewer): its photo's tags, and the window's counts."""
+        if self.hooks.carry_tags is not None:
+            self.hooks.carry_tags([(t.job.source, path)])
+        _tag_upscaled(self.hooks, t.job, [path])
+        self._update()
+
+    def _kept_unsaved(self) -> list[_Result]:
+        return [t for _j, t in self.tiles() if t.keep and not t.saved_to]
 
     def try_again(self, jid: str) -> None:
         """A photo whose generation failed, sent again (the others stay as they are)."""
@@ -1422,7 +1568,7 @@ class BatchResultsWindow(QWidget):
             return
         new = Job(uuid.uuid4().hex, "edit", old.prompt, old.model_label, old.gen, old.count, old.aspect,
                   old.resolution, source=old.source, references=list(old.references), settings=old.settings,
-                  upscale=old.upscale)
+                  upscale=old.upscale, bulk=True)
         at = self.col.indexOf(sec)
         self.batch[self.batch.index(old)] = new
         self.sections.pop(jid, None)
@@ -1439,21 +1585,24 @@ class BatchResultsWindow(QWidget):
         out, failed = [], 0
         photos = 0
         for job in self.batch:
-            made = []
+            made, missed = [], 0
             for t in self.sections[job.id].tiles:
-                if not t.keep:
+                if not t.keep or t.saved_to:                      # (one saved from the viewer isn't saved twice)
                     continue
                 try:
-                    made.append(A.save_edit(t.data, job.source, job.model_label, job.settings.get("prompt", "")))
+                    t.mark_saved(A.save_edit(t.data, job.source, job.model_label, said_prompt(job)))
+                    made.append(t.saved_to)
                 except (OSError, ValueError) as e:
                     failed += 1
+                    missed += 1
                     self.sections[job.id].state.setText(f"Couldn't save one: {e}")
             if made and self.hooks.carry_tags is not None:
                 self.hooks.carry_tags([(job.source, p) for p in made])
             _tag_upscaled(self.hooks, job, made)
-            A.drop_pending(job.id)
-            photos += bool(made)
-            out += made
+            if not missed:
+                A.drop_pending(job.id)                           # one whose results couldn't all be written is kept
+            photos += any(t.saved_to for t in self.sections[job.id].tiles)
+        out = [t.saved_to for _j, t in self.tiles() if t.saved_to]
         self.saved = out
         self.failed = failed
         self.save_btn.setEnabled(False)
@@ -1480,7 +1629,7 @@ class BatchResultsWindow(QWidget):
     def run_again(self) -> None:
         """The form again for the same photos, in place of these results (see `ResultsWindow.run_again`). Photos
         still with Astria are asked about by the close itself."""
-        unsaved = [t for _j, t in self.tiles() if t.keep] if not self.saved else []
+        unsaved = self._kept_unsaved()
         running = sum(1 for j in self.batch if not j.done)
         if unsaved and not running:
             answer = _unsaved_before_run_again(self, len(unsaved))
@@ -1509,7 +1658,7 @@ class BatchResultsWindow(QWidget):
         win.show()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        unsaved = [t for _j, t in self.tiles() if t.keep] if not self.saved and not self._settled else []
+        unsaved = self._kept_unsaved() if not self._settled else []
         running = 0 if self._settled else sum(1 for j in self.batch if not j.done)
         if unsaved or running:
             box = QMessageBox(self)
@@ -1547,11 +1696,17 @@ class BatchResultsWindow(QWidget):
             else:
                 event.ignore()
                 return
+        for j in self.batch:
+            # A photo whose results were all dealt with — saved, or left out on purpose — isn't fetched again.
+            sec = self.sections.get(j.id)
+            if j.done and sec is not None and sec.tiles and not any(t.keep and not t.saved_to for t in sec.tiles):
+                A.drop_pending(j.id)
         try:
             jobs().progress.disconnect(self._progress)
             jobs().finished.disconnect(self._finished)
         except (RuntimeError, TypeError):
             pass
+        self._review_closed()
         super().closeEvent(event)
 
     def save_finished_only(self) -> list[str]:
@@ -1562,9 +1717,9 @@ class BatchResultsWindow(QWidget):
                 continue
             made, missed = [], 0
             for t in self.sections[job.id].tiles:
-                if t.keep and not getattr(t, "saved_to", ""):
+                if t.keep and not t.saved_to:
                     try:
-                        t.saved_to = A.save_edit(t.data, job.source, job.model_label, job.settings.get("prompt", ""))
+                        t.mark_saved(A.save_edit(t.data, job.source, job.model_label, said_prompt(job)))
                         made.append(t.saved_to)
                     except (OSError, ValueError):
                         missed += 1
@@ -1575,6 +1730,6 @@ class BatchResultsWindow(QWidget):
                 A.drop_pending(job.id)                       # a job whose results couldn't all be written is kept
             self.unwritten = getattr(self, "unwritten", 0) + missed
             out += made
-        self.saved = out
+        self.saved = [t.saved_to for _j, t in self.tiles() if t.saved_to]
         return out
 

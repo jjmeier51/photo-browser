@@ -867,14 +867,29 @@ def _pointer_on_a_window() -> bool:
     return any(w.frameGeometry().contains(pos) for w in app_windows())
 
 
+_APP_STATE = None                 # the application state last reported (Qt.ApplicationState)
+
+
 def on_app_state(state) -> None:
-    """Photo Browser for Mac was activated. macOS sends this every time the Dock icon is clicked — also when Photo Browser for Mac
-    is already the app in front, which is when its other windows (a viewer, Edit with AI, a downloader) can
-    still be sitting behind another app's: a click on one window brings only that one forward. So a click on
-    the Dock icon (or ⌘-Tab) brings them all; a click on a window is left alone."""
+    """The app's state changed — or was reported again. Two different things arrive here as "active":
+
+    - **The app was already in front and "active" comes again.** Qt sends that only for a *reopen* — a click on
+      the Dock icon (or the app opened again from Finder) — never for a click on a window. That is exactly when
+      a viewer, Edit with AI or a downloader can still be behind another app's windows (a click on one window
+      brings only that one forward), and macOS itself does nothing more for an app that's already active. So:
+      every window comes forward. No guessing from where the pointer is — with a hidden or magnified Dock its
+      icons sit over our own windows, which is how this used to be mistaken for a click on a window.
+    - **The app became active from behind.** A Dock click or ⌘-Tab (macOS brings the windows itself; we make
+      sure), or a click on one of our windows — then only that window should come forward, so it's left alone
+      when the pointer is on one of them."""
+    global _APP_STATE
+    was, _APP_STATE = _APP_STATE, state
     if state != Qt.ApplicationState.ApplicationActive:
         return
     if time.monotonic() - _RAISED_AT < 0.4 or QApplication.activePopupWidget() is not None:
+        return
+    if was == Qt.ApplicationState.ApplicationActive:      # a reopen: the Dock icon, clicked with the app in front
+        QTimer.singleShot(0, raise_all_windows)
         return
     QTimer.singleShot(0, lambda: None if _pointer_on_a_window() else raise_all_windows())
 
@@ -6217,9 +6232,10 @@ class Pane(QWidget):
     def _is_fs_listing(self) -> bool:
         return not self.is_virtual
 
-    def view_media(self, path: str, among: list[str] | None = None) -> None:
+    def view_media(self, path: str, among: list[str] | None = None, review=None):
         """The viewer (media_viewer.py — the iPhone's), on `path`, through `among` or the listing's photos and
-        videos in the order shown."""
+        videos in the order shown. `review` (a `media_viewer.Review`): the items are results not saved yet — the
+        viewer gets Save and Discard. Returns the viewer."""
         import frame_export
         import media_viewer
         items = among or [p for p in self.listing_paths() if kind_of(p) != "other"]
@@ -6243,7 +6259,7 @@ class Pane(QWidget):
             age_of=self._age_of,
             set_cover=self.cover_from_viewer, edit_photo=self.edit_photo,
             edit_with_ai=self.ai_edit, shown=self._follow_viewer, live_motion=live_motion_of,
-            extra={"frame_note": frame_export.engine_note})
+            review=review, extra={"frame_note": frame_export.engine_note})
         # Opens over Photo Browser for Mac's window, as tall as its display, and takes each item's shape within that.
         viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None, box=self.window().geometry())
         viewer.removed.connect(lambda _paths: self.refresh_results())
@@ -6252,6 +6268,7 @@ class Pane(QWidget):
         viewer.show()
         viewer.raise_()
         viewer.activateWindow()
+        return viewer
 
     def make_book(self, paths: list[str]) -> None:
         """Make Book PDF… (book_window.py → bookify.py): each text file typeset like a printed book, the PDF put
@@ -6580,7 +6597,9 @@ class Pane(QWidget):
 
         return ai_window.AIHooks(tags_of=lambda p: tag_store().tags(p, fresh=False), carry_tags=carry,
                                  reveal=self._reveal_from_viewer,
-                                 view=lambda paths, start: self.view_media(start, among=paths), keep_open=keep,
+                                 view=lambda paths, start: self.view_media(start, among=paths) and None,
+                                 review=lambda paths, start, rv: self.view_media(start, among=paths, review=rv),
+                                 keep_open=keep,
                                  add_tags=add_tags, current_folder=current_folder, note=self._airdrop_noted,
                                  create=lambda settings: self.ai_create(current_folder() or str(Path.home() / "Pictures"),
                                                                         settings))
@@ -10501,6 +10520,8 @@ def main() -> None:
     apply_theme(app)
     win = MainWindow(args.src, args.dst)
     app.styleHints().colorSchemeChanged.connect(lambda _s: apply_theme(app, win))
+    global _APP_STATE
+    _APP_STATE = app.applicationState()
     app.applicationStateChanged.connect(on_app_state)        # the Dock icon brings every window forward
     season_timer = QTimer(app)                               # Follow the Seasons: a new day, a new theme
     season_timer.timeout.connect(_season_tick)

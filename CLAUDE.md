@@ -261,6 +261,14 @@ actions the app makes no network calls.
   too; saved files tagged "upscaled" via `_tag_upscaled`) — pure Lanczos, nothing added — §1.13-d.
   **Save / Save All and Run Again close the results window** (said in a toast; kept-but-unsaved results are asked
   about once on Run Again, `ai/run_again_unsaved`).
+  **Results are saved or discarded in the viewer too** (§6ba): a double-click opens them with **Save / Discard**
+  in the bar — `media_viewer.Review` via `Hooks.review`, owned by the results window (`ai_window._Reviewed`:
+  `_save_tile`, `_tile_saved`; tiles carry `saved_to`, and Save / Save All skip those). Every save writes the
+  prompt **as typed** (`ai_window.said_prompt`; the pending record's `said`) — UserComment "AI-generated · Prompt:
+  …" + Software "PhotoBrowser AI — <model>", the iPhone's two tags; `media_info.image_info` reads them back
+  (`ai_prompt`, `ai_model`) for the viewer's Info. A done job's pending note is dropped once every result is
+  saved or left out. **A batch's prompts are bulk** (`Job.bulk` → `astria.note_bulk`; older runs guessed by
+  `bulk_guess`; `set_bulk` = the person's word) and the Astria.ai Browser's **Hide Bulk Edits** leaves them out.
   **Several photos, one prompt** (select photos ▸ Edit N Photos with AI…): a job per photo with the same prompt and
   settings, four at a time (`ai_window.LANES`), one `BatchResultsWindow` with every photo's results, Save All once
   they're all back (each into the "AI" folder beside its own photo), Try Again per failed photo. Photo Browser for Mac only.
@@ -279,6 +287,9 @@ actions the app makes no network calls.
   photos as references (`Pane.ai_create(folder, settings)`); (3) a Flux LoRA trained on Astria
   (`astria.Client.create_tune`, the iPhone's `createTune`). A person's model records consent; outputs are marked
   AI-made. `AIModel.nanoBananaPro` / "Nano Banana Pro" added to both apps' lists — §6ai.
+  **The Dock icon** (`photo_browser.on_app_state`, §6ba): "active" reported while already active is a Dock click
+  (a reopen) → `raise_all_windows()` always; the pointer test is only for inactive → active. Don't go back to
+  deciding by the pointer alone — a hidden Dock's icons sit over our windows.
   Photo Browser for Mac's **menu bar** (`mac/menubar.py`) holds every command and its ⌘ shortcut (one binding per key —
   panes keep only Return/Space); the right-click menu groups a folder's tools under Download ▸ / AI ▸.
   Photo Browser for Mac's **Edit Metadata** (right-click ▸ Edit Metadata… / ⌘I; `mac/metadata_edit.py`, `mac/metadata_window.py`):

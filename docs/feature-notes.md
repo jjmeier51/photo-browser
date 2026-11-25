@@ -2038,6 +2038,97 @@ column) — a folder whose contents change shows its new size when the listing i
 
 Tested offscreen (`ui2/t_favsize.py`, 20 checks; screenshots of all three views). Not run on a Mac.
 
+## 6ba. Mac: the Dock icon (again), results saved or discarded in the viewer, the prompt in the file, bulk edits hidden (Nov 25, 2026)
+
+**Asked for:** the Dock icon still doesn't bring every window (Edit with AI, say) forward; double-click a result
+Astria sent back and save or discard it there, in the photo viewer; make sure the AI prompt goes into the
+photo's metadata as on the iPhone; and a way to hide all the bulk Edit with AI prompts in the Astria.ai Browser.
+
+### The Dock icon — `photo_browser.on_app_state`
+
+§6ad's version decided "was that a Dock click or a click on a window?" from **where the pointer was**: over one
+of our windows and away from the screen's edge meant a window click, so nothing was raised. With the Dock hidden
+(or magnified, or a window under it) its icons sit *over* our windows — `availableGeometry` doesn't leave a
+hidden Dock out — so a Dock click read as a window click and did nothing. That's the likely reason it "still
+doesn't" work.
+
+The two cases don't need telling apart by the pointer. `on_app_state` now keeps the last state it was told
+(`_APP_STATE`):
+
+- **"active" arriving when the app was already active** is, in Qt, only ever a *reopen* — the Dock icon clicked
+  (or the app opened again from Finder) with the app in front; Qt forces that report through
+  (`applicationShouldHandleReopen`), and a click on a window never produces it. That's exactly the case macOS
+  does nothing for by itself. → `raise_all_windows()`, unconditionally.
+- **inactive → active**: brought forward by the Dock / ⌘-Tab (macOS raises the windows itself; we do too), or by
+  a click on one of our windows — then only that one should come, so the pointer test is kept for *this* case
+  only.
+
+Window ▸ **Bring All to Front** is the same `raise_all_windows`. Checked offscreen as a sequence of states (with
+the pointer "on a window" throughout). **The Dock itself can't be clicked here** — if it still misses on the
+Mac, Window ▸ Bring All to Front tells the two halves apart: if that works, the report isn't arriving; if it
+doesn't, the raising is at fault.
+
+### Save / Discard in the viewer — `media_viewer.Review`, `ai_window._Reviewed`
+
+A double-click on a result already opened the viewer on temporary copies; it could only look. Now
+`media_viewer.Hooks.review` (a `Review`: `state(path)` → "keep" / "discard" / "saved", `save(path)`,
+`discard(path, leave)`) puts **Discard** and **Save** in the viewer's bar (⌘D / ⌘S), in place of the ♡ / bin / ✦
+buttons (labels are for files that are kept):
+
+- **Save** saves that one result now — into the "AI" folder beside its photo (a creation: the folder's AI
+  folder), through the same `save_edit` / `save_created` as the window's Save, with the photo's tags and the
+  "upscaled" tag where due — and moves on to the next result nobody has decided about.
+- **Discard** leaves it out (the tile's red ✕ — nothing is deleted, it just isn't saved) and moves on; on a
+  discarded one the button reads **Discarded**, and pressing it keeps it after all.
+- A saved one says "Saved ✓"; the title says "— saved" / "— won't be saved".
+
+The window is the owner: `_Reviewed` (mixed into `ResultsWindow` and `BatchResultsWindow`) keeps temp file →
+tile, hands the `Review` to `AIHooks.review` (→ `Pane.view_media(..., review=)`, which now returns the viewer)
+and closes those viewers when it closes. Tiles know `saved_to` (blue ✓, "Saved", no longer toggled by a click);
+`_update` counts kept-and-unsaved ("Save 1 … 1 already saved."); **Save / Save All skip what the viewer already
+saved** (the batch's Save didn't check before). In a batch the viewer runs through every photo's results and
+each Save goes beside its own photo.
+
+A fix that came with it: a job's "fetch this later" note (`pending`) was only dropped by Save or "Don't Save".
+Un-keeping every result and closing asked nothing and dropped nothing — so the next launch fetched and **saved
+the lot**. Closing with every result dealt with (saved, or left out on purpose) now drops the note, per job.
+
+### The prompt in the file
+
+It was already written — `astria._encode`: EXIF **UserComment** "AI-generated · Prompt: …" and **Software**
+"PhotoBrowser AI — <model>", exactly the iPhone's two tags (`AIExtend.swift`) — checked again with ExifTool on
+edits, creations and the batch. Two gaps closed:
+
+- a generation finished after a quit (`resume_pending`) wrote the text *as sent* (model prefix + negative
+  prompt) instead of the prompt as typed: the pending record now carries `said`, and every save goes through
+  `ai_window.said_prompt(job)` (the form's prompt; the sent text only when there's none);
+- nothing on the Mac *showed* it. `media_info.image_info` now returns `ai`, `ai_prompt`, `ai_model`
+  (`user_comment` decodes ASCII / UTF-16 either way round; Pillow hands Software back as Latin-1, re-read as
+  UTF-8) and the viewer's Info has **AI Model** and **AI Prompt** — for the iPhone's AI photos too.
+
+### Hide Bulk Edits — `astria.bulk_ids`, the Astria.ai Browser
+
+"Edit N Photos with AI" makes one Astria prompt per photo. The browser has a **Hide Bulk Edits** tick (second
+row, remembered: `browser_hide_bulk`); the status line says how many prompts it's hiding. What counts:
+
+- **recorded** — from now on every prompt a batch makes is noted by its Astria id as it's created (`Job.bulk`,
+  set by `BatchResultsWindow`, → `astria.note_bulk` in the job's `on_prompt`; `bulk_prompts` in the AI store);
+- **guessed** (`bulk_guess`) for runs made before that, and on the iPhone: prompts with the same words for the
+  same model where at least two were created within 12 s of each other — a batch sends several at once, which
+  Run Again can't — plus the rest of that chain (each within 15 minutes of the one before: the photos that
+  waited their turn). Run Again on one photo, minutes apart, isn't caught;
+- **your word** — right-click a picture ▸ *Mark as Bulk Edit* / *Not a Bulk Edit* (`set_bulk`), over both.
+
+The guess reads only what the listing already holds (text, model, time): nothing more is asked of Astria. It's
+a guess — two single edits sent with the same prompt seconds apart would be taken for a batch (right-click
+puts that right).
+
+**Tested offscreen** (`ui2/t_aireview.py`, 45 checks; the earlier batch test still passes): the viewer's
+buttons through keep / discard / saved on one photo and on a batch, files and tags and metadata read back with
+ExifTool, Save not saving twice, the windows closing their viewers, the pending note, the recovery path, Info,
+the bulk rule and the browser's tick and menu, and the Dock's sequence of states. **Not run on a Mac**, and
+nothing was sent to Astria (the browser's filter was fed made-up prompts).
+
 ## 6w-3. Make Book: pictures beside the text, placed and sized freely, on a live page — `mac/bookify.py`, `mac/book_pictures.py` (Nov 23, 2026)
 
 **Asked for:** "allowing the user to embed pictures next to text/paragraphs. Give the user full autonomy as to

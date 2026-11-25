@@ -2041,6 +2041,69 @@ def toggle_favorite(prompt: str) -> bool:
     return on[0]
 
 
+# ----------------------------------------------------------------------------- bulk edits
+#
+# "Edit N Photos with AI" sends the same prompt once per photo, so one run fills the Astria.ai Browser with a
+# prompt for every photo. They can be left out there (Hide Bulk Edits). Which prompts are a run's:
+#
+# - **recorded**: every prompt a batch makes is noted here by its Astria id as it's created (`note_bulk`);
+# - **guessed**, for runs made before that was kept (and on the iPhone): prompts with the same text for the same
+#   model, where at least two were created within `BULK_BURST` seconds of each other — a batch starts several
+#   at once, which a person pressing Run Again can't — and the rest of the chain (each within `BULK_LINK` of the
+#   one before: the photos that waited their turn);
+# - the person's own word settles any one prompt either way (`set_bulk`), over both.
+
+BULK_BURST = 12.0                 # two prompts with the same words this close together were sent at once
+BULK_LINK = 15 * 60.0             # …and one this soon after another of the same run belongs to it
+BULK_KEPT = 50000
+
+
+def note_bulk(prompt_id) -> None:
+    """A prompt made by a batch run (Edit N Photos with AI), remembered by its Astria id."""
+    try:
+        pid = int(prompt_id)
+    except (TypeError, ValueError):
+        return
+    store().update("bulk_prompts", lambda lst: ([p for p in (lst or []) if p != pid] + [pid])[-BULK_KEPT:])
+
+
+def set_bulk(prompt_ids, bulk: bool) -> None:
+    """The person's word: these prompts are (or aren't) bulk edits — over what's recorded and what's guessed."""
+    ids = {int(p) for p in prompt_ids}
+    yes, no = ("bulk_prompts", "not_bulk_prompts") if bulk else ("not_bulk_prompts", "bulk_prompts")
+    store().update(yes, lambda lst: ([p for p in (lst or []) if p not in ids] + sorted(ids))[-BULK_KEPT:])
+    store().update(no, lambda lst: [p for p in (lst or []) if p not in ids])
+
+
+def bulk_guess(prompts) -> set[int]:
+    """The ids, among `prompts`, that look like a batch run's (see above)."""
+    groups: dict[tuple, list] = {}
+    for p in prompts:
+        if p.created and (p.text or "").strip():
+            groups.setdefault((p.tune_id, " ".join(p.text.split())), []).append(p)
+    out: set[int] = set()
+    for same in groups.values():
+        if len(same) < 2:
+            continue
+        same.sort(key=lambda p: p.created)
+        run = [same[0]]
+        for p in same[1:] + [None]:
+            if p is not None and p.created - run[-1].created <= BULK_LINK:
+                run.append(p)
+                continue
+            if any(b.created - a.created <= BULK_BURST for a, b in zip(run, run[1:])):
+                out.update(q.id for q in run)
+            run = [p] if p is not None else []
+    return out
+
+
+def bulk_ids(prompts) -> set[int]:
+    """Which of `prompts` are bulk edits: recorded or guessed, less the ones the person said aren't."""
+    known = {int(p) for p in (store().get("bulk_prompts", []) or [])}
+    never = {int(p) for p in (store().get("not_bulk_prompts", []) or [])}
+    return ({p.id for p in prompts if p.id in known} | bulk_guess(prompts)) - never
+
+
 def note_pending(job: dict) -> None:
     store().update("pending", lambda lst: [j for j in (lst or []) if j.get("job") != job["job"]] + [job])
 
@@ -2080,10 +2143,11 @@ def resume_pending(client: Client, busy: set[str] | None = None, max_ticks: int 
                 except (OSError, ValueError):
                     pass
             try:
+                said = job.get("said") or job.get("prompt", "")     # the prompt as typed — what goes in the file
                 if job.get("source"):
-                    saved.append(save_edit(data, job["source"], job.get("model", ""), job.get("prompt", "")))
+                    saved.append(save_edit(data, job["source"], job.get("model", ""), said))
                 else:
-                    saved.append(save_created(data, job["folder"], job.get("model", ""), job.get("prompt", "")))
+                    saved.append(save_created(data, job["folder"], job.get("model", ""), said))
             except OSError:
                 pass
         drop_pending(jid)

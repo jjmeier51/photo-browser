@@ -40,7 +40,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QPoint, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QImage, QKeySequence, QPainter,
                            QPainterPath, QPen, QPixmap, QShortcut)
-from PySide6.QtWidgets import (QAbstractScrollArea, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QAbstractScrollArea, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QMenu, QPlainTextEdit, QProgressBar, QPushButton, QSlider, QVBoxLayout, QWidget)
 
 import astria as A
@@ -567,10 +567,21 @@ class BrowserWindow(QWidget):
             box.currentIndexChanged.connect(lambda _i: self.refilter(reset=True))
             row.addWidget(box)
         tv.addLayout(row)
+        # Bulk edits (Edit N Photos with AI: one prompt per photo) can be left out — astria.bulk_ids
+        self.bulk: set[int] = set()
+        self.bulk_hidden = 0
+        self.hide_bulk = QCheckBox("Hide Bulk Edits")
+        self.hide_bulk.setToolTip("Leaves out what “Edit N Photos with AI” made — the same prompt sent for several "
+                                  "photos at once.\nRuns made from now on are remembered exactly; earlier ones are "
+                                  "recognised by the same prompt sent for several photos within seconds.\n"
+                                  "Right-click a picture to say a prompt is, or isn't, a bulk edit.")
+        self.hide_bulk.setChecked(bool(A.store().get("browser_hide_bulk", False)))
+        self.hide_bulk.toggled.connect(self._hide_bulk_toggled)
         row2 = QHBoxLayout()
         row2.setSpacing(8)
         self.status = _small("", wrap=False)
         row2.addWidget(self.status, 1)
+        row2.addWidget(self.hide_bulk)
         row2.addWidget(_small("Size", wrap=False))
         self.size = QSlider(Qt.Orientation.Horizontal)
         self.size.setRange(90, 360)
@@ -722,6 +733,12 @@ class BrowserWindow(QWidget):
             self.view.grouped = grouped
             A.store().set("browser_layout", "prompt" if grouped else "grid")
         shown = [p for p in prompts if self._matches(p, terms, without, span, model, show)]
+        self.bulk = A.bulk_ids(prompts)
+        self.bulk_hidden = 0
+        if self.hide_bulk.isChecked():
+            kept = [p for p in shown if p.id not in self.bulk]
+            self.bulk_hidden = len(shown) - len(kept)
+            shown = kept
         self.view.set_prompts(shown, keep_scroll=not reset)
         live = {it.key for it in self.view.flat}
         if self.selected - live:
@@ -739,12 +756,23 @@ class BrowserWindow(QWidget):
             text += f" · {saved:,} downloaded"
         if len(self.prompts) != n_prompts:
             text += f"   (of {len(self.prompts):,} prompts)"
+        if self.bulk_hidden:
+            text += f"   ·   {self.bulk_hidden:,} bulk edit{'s' if self.bulk_hidden != 1 else ''} hidden"
         if self.loading:
             text += "   ·   updating…"
         elif self.load_note:
             text += "   ·   " + self.load_note
         self.status.setText(text)
         self.older_btn.setVisible(not self.loading and not self.exhausted and bool(self.prompts))
+
+    def _hide_bulk_toggled(self, on: bool) -> None:
+        A.store().set("browser_hide_bulk", bool(on))
+        self.refilter(reset=True)
+
+    def _set_bulk(self, prompts: list, bulk: bool) -> None:
+        """The person's word on these prompts (right-click): bulk edits, or not."""
+        A.set_bulk([p.id for p in prompts], bulk)
+        self.refilter()
 
     def _size_changed(self, px: int) -> None:
         A.store().set("browser_size", px)
@@ -1155,6 +1183,14 @@ class BrowserWindow(QWidget):
             menu.addAction("Use Prompt in Create with AI…", lambda: self.use_prompt(item.prompt))
         menu.addAction("Select All from This Prompt",
                        lambda: self.select_add([it for it in self.view.flat if it.prompt.id == item.prompt.id]))
+        menu.addSeparator()
+        theirs = list({it.prompt.id: it.prompt for it in items}.values())
+        if all(p.id in self.bulk for p in theirs):
+            menu.addAction("Not a Bulk Edit" if len(theirs) == 1 else f"Not Bulk Edits ({len(theirs)} prompts)",
+                           lambda: self._set_bulk(theirs, False))
+        else:
+            menu.addAction("Mark as Bulk Edit" if len(theirs) == 1 else f"Mark as Bulk Edits ({len(theirs)} prompts)",
+                           lambda: self._set_bulk(theirs, True))
         saved = self.saved_map.get(item.key)
         if saved and os.path.exists(saved) and self.hooks.reveal is not None:
             menu.addSeparator()

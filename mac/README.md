@@ -298,7 +298,9 @@ Everything Photo Browser for Mac does is in its menus, acting on the pane you're
   the tools in groups: **Adjust ▸** (Crop, Rotate, Convert WebP to JPEG), **Retouch ▸** (AI Upscale 2×, Erase
   Area, Remove Watermark, Remove Objects), **Video ▸** (**Stitch Videos**, Export All Frames, Upscale Video), **CapCut ▸**, **AI ▸** (Edit / Create with AI, Astria.ai Browser, Make AI Model, AI Models),
   **Download ▸** (SimpCity, Instagram, Facebook, TikTok, Fanfix, Depop, Google Drive, taylorpictures.net).
-- **Window** — Minimize, Zoom, Bring All to Front, and every viewer and tool window that's open.
+- **Window** — Minimize, Zoom, Bring All to Front, and every viewer and tool window that's open. A click on the
+  app's Dock icon does the same as Bring All to Front: every window — Edit with AI, viewers, downloaders —
+  comes in front of other apps' windows.
 - **Help** — the guide and the keyboard shortcuts in a window with a search field, Find a Command…, Welcome…,
   About.
 
@@ -1763,7 +1765,7 @@ model and the models' tune ids).
   window for all of them**: each photo with its original beside its name, its results appearing under it as they
   arrive. When every photo is back, **Save All** puts each photo's results in the "AI" folder beside it
   ("<name> AI.jpg", with that photo's date, place and tags). Click a result to leave it out; double-click to
-  see it full size (←/→ then goes through the whole batch). A photo Astria couldn't do says why and has
+  see it full size (←/→ then goes through the whole batch) — with **Save** and **Discard** there, as below. A photo Astria couldn't do says why and has
   **Try Again** — the others aren't sent again. "How many" is per photo (5 photos × 2 = 10 images; over 20
   images it asks first). Closing while some are still with Astria is fine: they're saved to their folders when
   they arrive, the next time Photo Browser for Mac's AI is used.
@@ -1771,7 +1773,12 @@ model and the models' tune ids).
 - **Generate** opens the job's window: it shows what Astria's doing ("2 of 4 ready…"), then the results.
   Click one to leave it out, double-click to see it full size in the viewer, then **Save** — an edit's
   results go into an "AI" folder beside the photo as "<name> AI.jpg" with the photo's date, place and tags,
-  a creation's into the folder's "AI" folder; the model and prompt are written into each file. Closing with
+  a creation's into the folder's "AI" folder; the model and prompt are written into each file (EXIF User
+  Comment "AI-generated · Prompt: …" and Software "PhotoBrowser AI — <model>", the same two tags the iPhone app
+  writes — the viewer's Info shows them as **AI Model** and **AI Prompt**).
+  **In the viewer** the results have **Discard** and **Save** at the top (⌘D / ⌘S): Save puts that one on the
+  drive there and then and moves to the next; Discard leaves it out (press it again to keep it after all). The
+  results window keeps count — its Save then saves only what's left. Closing with
   results unsaved asks first. **Run Again** opens the form as it was. If you quit while Astria is still
   working, the images are saved to the folder the next time you use Photo Browser for Mac's AI (within two hours).
 - **Astria.ai Browser…** — see the next section.
@@ -1786,6 +1793,10 @@ account has made — from Photo Browser for Mac, the iPhone app, or Astria's own
   dense grid; hold the pointer over any picture for its prompt. The Size slider sets the tiles. A green ✓ marks
   what's already downloaded. It opens on what it showed last time and brings itself up to date in the
   background; **Reload** (⌘R) reads again, **Load Older** goes further back.
+- **Hide Bulk Edits** (a tick under the search field, remembered) leaves out the prompts "Edit N Photos with
+  AI" made — one per photo. Runs made from now on are remembered exactly; earlier ones (and the iPhone's) are
+  recognised by the same prompt having been sent for several photos within seconds. Right-click a picture ▸
+  **Mark as Bulk Edit** / **Not a Bulk Edit** to put any one right.
 - **Finding.** The search field (⌘F) takes words from the prompt, the model or the date — all must match;
   `"golden hour"` keeps words together, `-blurry` leaves a word out, `date:2026-10`, `before:2026`,
   `after:2026-06` go by when it was made. Capitals and accents don't matter. Beside it: one model, **Not

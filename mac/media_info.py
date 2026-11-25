@@ -360,6 +360,50 @@ def _gps(g: dict) -> tuple[float, float] | None:
     return round(lat, 6), round(lng, 6)
 
 
+def user_comment(raw) -> str:
+    """An EXIF UserComment as text: its 8-byte character-code header ("ASCII", "UNICODE", …) taken off and the
+    rest decoded — UTF-16 in whichever byte order it was written."""
+    if isinstance(raw, str):
+        return raw.strip("\0 ").strip()
+    if not isinstance(raw, (bytes, bytearray)) or not raw:
+        return ""
+    raw = bytes(raw)
+    head, body = raw[:8], raw[8:]
+    try:
+        if head.startswith(b"UNICODE"):
+            if body[:2] in (b"\xff\xfe", b"\xfe\xff"):
+                return body.decode("utf-16").strip("\0 ").strip()
+            little = body[1::2].count(0) > body[0::2].count(0)       # plain text: the zero bytes say which order
+            return body.decode("utf-16-le" if little else "utf-16-be", "replace").strip("\0 ").strip()
+        if head.startswith(b"ASCII") or head.strip(b"\0") == b"":
+            return body.decode("utf-8", "replace").strip("\0 ").strip()
+        return raw.decode("utf-8", "replace").strip("\0 ").strip()
+    except (UnicodeDecodeError, ValueError):
+        return ""
+
+
+AI_MARK = "AI-generated"                       # what both apps write first in an AI picture's UserComment
+AI_SOFTWARE = "PhotoBrowser AI"                # …and in its Software tag, followed by " — <model>"
+
+
+def ai_of(comment: str, software: str) -> dict:
+    """{"ai": True, "ai_prompt", "ai_model"} from a picture's UserComment and Software tags, as the iPhone app and
+    Photo Browser for Mac write them into what Edit / Create with AI saves ("AI-generated · Prompt: …",
+    "PhotoBrowser AI — <model>") — {} for any other picture."""
+    out: dict = {}
+    if comment.startswith(AI_MARK):
+        out["ai"] = True
+        prompt = comment.partition("Prompt:")[2].strip()
+        if prompt:
+            out["ai_prompt"] = prompt
+    if software.startswith(AI_SOFTWARE):
+        out["ai"] = True
+        model = software[len(AI_SOFTWARE):].lstrip(" —-–").strip()
+        if model:
+            out["ai_model"] = model
+    return out
+
+
 def _read_image(path: str) -> dict:
     from PIL import Image
     try:
@@ -402,6 +446,16 @@ def _read_image(path: str) -> dict:
             caption = desc.strip() if isinstance(desc, str) else ""
         if caption:
             out["caption"] = caption.strip()
+        software = exif.get(305)
+        if isinstance(software, (bytes, bytearray)):
+            software = bytes(software).decode("utf-8", "replace")
+        elif isinstance(software, str):                # Pillow reads the tag as Latin-1; both apps write UTF-8
+            try:
+                software = software.encode("latin-1").decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                pass
+        out.update(ai_of(user_comment(exif.get_ifd(0x8769).get(37510)),
+                         software.strip("\0 ") if isinstance(software, str) else ""))
     return out
 
 
@@ -447,7 +501,8 @@ def res_label(width: int, height: int) -> str:
 
 
 def image_info(path: str) -> dict:
-    """{width, height (as shown), format, taken (unix), camera, place (lat, lng), caption}."""
+    """{width, height (as shown), format, taken (unix), camera, place (lat, lng), caption} — and, for a picture
+    Edit / Create with AI made (either app), {ai, ai_prompt, ai_model}."""
     return _cached(path, "image", _read_image)
 
 

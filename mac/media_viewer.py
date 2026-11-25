@@ -124,7 +124,18 @@ class Hooks:
     edit_with_ai: Callable[[str], None] | None = None         # the photo → Edit with AI (ai_window.py)
     shown: Callable[[str], None] | None = None                # the viewer moved to this file (the pane's highlight follows)
     live_motion: Callable[[str], str] | None = None           # a photo → its Live Photo's movie ("" — it isn't one)
+    review: "Review | None" = None                            # results not saved yet: Save / Discard in the bar
     extra: dict = field(default_factory=dict)
+
+
+@dataclass
+class Review:
+    """Pictures looked at before they're kept — Edit / Create with AI's results, opened full size from their
+    window. The viewer then has **Save** and **Discard** in its bar (⌘S / ⌘D); the window that owns the results
+    does the work and remembers the answer."""
+    state: Callable[[str], str]               # "keep" (not decided), "discard", "saved" — "" when it isn't one of them
+    save: Callable[[str], str]                # save it now → what to say ("" = it couldn't be)
+    discard: Callable[[str, bool], None]      # (path, True): leave it out · (path, False): keep it after all
 
 
 # ----------------------------------------------------------------------------- reading photos
@@ -1290,6 +1301,14 @@ QToolButton#ViewerLive {{ color: #F2F2F7; background: rgba(255,255,255,0.10); bo
                           border-radius: 9px; padding: 1px 8px; font-size: 11px; font-weight: 700; }}
 QToolButton#ViewerLive:hover, QToolButton#ViewerLive:checked {{ background: rgba(255,214,10,0.30);
                                                                  border-color: #FFD60A; color: #FFD60A; }}
+QToolButton#ViewerSave {{ color: white; background: #0A84FF; border: none; border-radius: 7px;
+                          padding: 4px 12px; font-size: 12px; font-weight: 600; }}
+QToolButton#ViewerSave:hover {{ background: #3D9BFF; }}
+QToolButton#ViewerSave:disabled {{ color: #C7C7CC; background: rgba(255,255,255,0.12); }}
+QToolButton#ViewerDiscard {{ color: #FF6961; background: transparent; border: 1px solid rgba(255,105,97,0.65);
+                             border-radius: 7px; padding: 3px 11px; font-size: 12px; font-weight: 600; }}
+QToolButton#ViewerDiscard:hover {{ background: rgba(255,69,58,0.22); }}
+QToolButton#ViewerDiscard:checked {{ color: #F2F2F7; background: rgba(255,69,58,0.55); border-color: transparent; }}
 QToolButton#ViewerButton {{ color: #F2F2F7; background: transparent; border: none; border-radius: 7px;
                             padding: 4px 7px; font-size: 13px; }}
 QToolButton#ViewerButton:hover {{ background: rgba(255,255,255,0.14); }}
@@ -1578,6 +1597,16 @@ class MediaViewer(QWidget):
         titles.addWidget(self.count)
         h.addSpacing(4)
         h.addLayout(titles, 1)
+        # Results being looked through before they're kept (hooks.review): Save and Discard, in place of the labels
+        self.save_btn = _bar_button("Save", "Save this one now (⌘S)", self.review_save)
+        self.save_btn.setObjectName("ViewerSave")
+        self.discard_btn = _bar_button("Discard", "Leave this one out — it won't be saved (⌘D)", self.review_discard)
+        self.discard_btn.setObjectName("ViewerDiscard")
+        self.discard_btn.setCheckable(True)
+        for b in (self.discard_btn, self.save_btn):
+            b.setVisible(False)
+            h.addWidget(b)
+            h.addSpacing(5)
         self.fav_btn = _bar_button("", "Favorite (⇧⌘F) — the iPhone app's Favorites", lambda: self.toggle_label("favorite"),
                                    "heart")
         self.del_btn = _bar_button("", "To Delete (⇧⌘X) — tags it “to-delete”, to go through later",
@@ -1776,7 +1805,8 @@ class MediaViewer(QWidget):
                            ("Ctrl+T", self.edit_tags), ("+", lambda: self.zoom(1.25)),
                            ("=", lambda: self.zoom(1.25)), ("-", lambda: self.zoom(0.8)),
                            ("0", self.fit_current), ("Ctrl+Shift+F", lambda: self.toggle_label("favorite")),
-                           ("Ctrl+Shift+A", lambda: self.toggle_label("ai")), ("Ctrl+Shift+X", self.toggle_to_delete)):
+                           ("Ctrl+Shift+A", lambda: self.toggle_label("ai")), ("Ctrl+Shift+X", self.toggle_to_delete),
+                           ("Ctrl+S", self.review_save), ("Ctrl+D", self.review_discard)):
             sc = QShortcut(QKeySequence(keys), self)
             sc.activated.connect(slot)
 
@@ -2263,7 +2293,85 @@ class MediaViewer(QWidget):
             if waiting and self.slideshow:                 # (its time on screen starts now)
                 self._slide.start(int(SLIDE_SECONDS * 1000))
 
+    # -- results not saved yet (hooks.review): Save / Discard
+    def _review_state(self, path: str | None = None) -> str:
+        r = self.hooks.review
+        if r is None or not self.paths:
+            return ""
+        try:
+            return r.state(self.current if path is None else path) or ""
+        except Exception:  # noqa: BLE001 — the window the results belong to has closed
+            return ""
+
+    def _show_review(self) -> None:
+        state = self._review_state()
+        on = bool(state)
+        self.save_btn.setVisible(on)
+        self.discard_btn.setVisible(on and state != "saved")
+        if not on:
+            return
+        self.save_btn.setEnabled(state != "saved")
+        self.save_btn.setText("Saved ✓" if state == "saved" else "Save")
+        self.save_btn.setToolTip("Saved" if state == "saved" else "Save this one now (⌘S)")
+        self.discard_btn.setChecked(state == "discard")
+        self.discard_btn.setText("Discarded" if state == "discard" else "Discard")
+        self.discard_btn.setToolTip("It won't be saved — click to keep it after all (⌘D)" if state == "discard" else
+                                    "Leave this one out — it won't be saved (⌘D)")
+        for b in (self.fav_btn, self.del_btn, self.ai_btn):       # labels are for files that are kept
+            b.setVisible(False)
+        name = os.path.basename(self.current)
+        self.title.setText(name + {"discard": "  —  won't be saved", "saved": "  —  saved"}.get(state, ""))
+
+    def _review_next(self) -> None:
+        """On to the next result nobody has decided about (after this one, then from the start)."""
+        n = len(self.paths)
+        for step in range(1, n):
+            j = (self.index + step) % n
+            if self._review_state(self.paths[j]) == "keep":
+                self.index = j
+                self.show_current()
+                return
+        self._show_review()
+
+    def review_save(self) -> None:
+        """⌘S / Save: this result saved now, by the window it came from."""
+        state = self._review_state()
+        if state in ("", "saved"):
+            return
+        try:
+            said = self.hooks.review.save(self.current)
+        except Exception as e:  # noqa: BLE001 — said, never a crash
+            said = ""
+            self.say(f"Couldn't save it: {e}")
+        if said:
+            self._review_next()
+            self.say(said)
+        else:
+            self._show_review()
+
+    def review_discard(self) -> None:
+        """⌘D / Discard: this result left out (again: kept after all). Nothing is deleted — it just isn't saved."""
+        state = self._review_state()
+        if state in ("", "saved"):
+            self._show_review()
+            return
+        leave = state != "discard"
+        try:
+            self.hooks.review.discard(self.current, leave)
+        except Exception:  # noqa: BLE001
+            self._show_review()
+            return
+        if leave:
+            self._review_next()
+            self.say("Discarded — it won't be saved.")
+        else:
+            self._show_review()
+            self.say("Kept — it will be saved.")
+
     def _show_labels(self) -> None:
+        self._show_review()
+        if self._review_state():
+            return
         self._show_to_delete()
         if self.hooks.labels_of is None:
             return
@@ -2446,7 +2554,11 @@ class MediaViewer(QWidget):
         if meta.get("place"):
             lat, lng = meta["place"]
             row("Place", f"{lat:.5f}, {lng:.5f}", f"https://maps.apple.com/?ll={lat},{lng}&q=Photo")
-        row("Caption", meta.get("caption", ""))
+        if meta.get("caption", "") != meta.get("ai_prompt", ""):
+            row("Caption", meta.get("caption", ""))
+        # What Edit / Create with AI wrote into the file (either app): the model and the prompt it was made from
+        row("AI Model", meta.get("ai_model", "") or ("AI-generated" if meta.get("ai") and not meta.get("ai_prompt") else ""))
+        row("AI Prompt", meta.get("ai_prompt", ""))
         try:                                         # a TikTok download's like count (the iPhone's Info shows it too)
             import tiktok
             likes = tiktok.likes_of(path)
