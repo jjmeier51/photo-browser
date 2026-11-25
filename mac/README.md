@@ -880,6 +880,9 @@ iPhone too, and one you set on the iPhone is shown that way here.
   results and collections, and the status line says how many are shown and by what ("12 items (4 shown —
   photos · HEIF · Hauppauge, NY)"). **Show Everything** clears them. Type, Format and Size stay as you go
   from folder to folder; a Location is the folder's own and is cleared when you leave it.
+  - **Show**: **Favorites** — only what you've favorited in this folder, files and folders; **Tagged** — only
+    what carries a tag; **Not Tagged** — the rest. Under those, **Favorites in Subfolders Too** and **Tagged
+    Items in Subfolders Too** list every one anywhere under the folder (a search of it; Back returns).
   - **Folders**: **Show Favorites** keeps, of the folders, only the ones you've favorited (the heart, shared
     with the iPhone); **Hide Favorites** keeps every folder except those. Folders only — the files beside them
     stay as they are.

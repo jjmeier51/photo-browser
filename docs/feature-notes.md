@@ -2195,6 +2195,32 @@ whole flow in the app on a folder of photos and a video — every key, Back and 
 with one unticked, the Trash, resuming, pausing by closing, the automatic finish, Not Now, Review Again, the
 options, a folder of folders, an empty one — and that an ordinary viewer is unchanged. **Not run on a Mac.**
 
+## 6bc. Mac: just the Favorites, or just the tagged items, of a folder — `PaneModel.labelled`, `Pane.search_here` (Nov 25, 2026)
+
+**Asked for:** a way to see just the Favorited items or the Tagged items inside a folder.
+
+The funnel's first submenu is now **Show: Everything / Favorites / Tagged / Not Tagged** (`LABEL_FILTERS`,
+`Pane.set_label_filter` → `PaneModel.set_labelled`; in `filterAcceptsRow` before everything else):
+
+- **Favorites** — only what carries the Favorite label (`labels_of`), **files and folders alike**;
+- **Tagged** — only what carries any tag (`tag_store().tags`; "to-delete" is a tag like any other);
+- **Not Tagged** — the rest (added along the way: it's the same test turned round, and it's how you find what
+  still needs tagging).
+
+It filters *the listing* — or a search's or collection's results — stacks with the other filters, stays on from
+folder to folder, shows in the status line ("7 items (2 shown — favorites)") and is cleared by Show Everything.
+Favoriting, unfavoriting, tagging or untagging something while it's on makes it appear or go at once
+(`on_tags_changed` re-runs the filter). It's separate from **Folders: Show / Hide Favorites** (§6az), which only
+ever touches folders.
+
+A listing filter doesn't look inside the folders it lists. For that the same submenu has, under a line,
+**Favorites in Subfolders Too** and **Tagged Items in Subfolders Too** (`Pane.search_here("is:favorite")` /
+`("is:tagged")`): the ordinary search, scoped to this folder, with those qualifiers — every favorite or tagged
+item anywhere under the folder as a results list, Back to return. (That's the iPhone's Favorites chip, which
+looks through the folder's whole subtree.) They're greyed on a page that isn't a real folder.
+
+Tested offscreen (`ui2/t_labels.py`, 16 checks). Not run on a Mac.
+
 ## 6w-3. Make Book: pictures beside the text, placed and sized freely, on a live page — `mac/bookify.py`, `mac/book_pictures.py` (Nov 23, 2026)
 
 **Asked for:** "allowing the user to embed pictures next to text/paragraphs. Give the user full autonomy as to

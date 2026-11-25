@@ -2865,6 +2865,8 @@ FORMAT_FILTERS = [
 # The iPhone's resolution filters (`VideoRes`, `ImageRes`): a video by its long side — 4K is 3840 and up, 1080p
 # 1920 and up, 720p 1280 and up, Low-Res the rest (`media_info.video_res`) — and a photo by its pixels, 2MP+ or
 # Low-Res. 12MP+ and 48MP+ are this app's own, for telling full-size camera photos from saved copies.
+# Items — files and folders alike — by what's been put on them: the Favorite label, or any tag at all.
+LABEL_FILTERS = [("", "Everything"), ("favorite", "Favorites"), ("tagged", "Tagged"), ("untagged", "Not Tagged")]
 # Folders by whether they're a Favorite (the heart, shared with the iPhone): files are never touched by it.
 FOLDER_FAV_FILTERS = [("", "All"), ("show", "Show Favorites"), ("hide", "Hide Favorites")]
 VIDEO_RES_FILTERS = [("", "All"), ("4k", "4K"), ("1080p", "1080p"), ("720p", "720p"), ("low", "Low-Res")]
@@ -4087,6 +4089,7 @@ class PaneModel(QSortFilterProxyModel):
         self.format_exts: frozenset[str] = frozenset()
         self.place: str | None = None                # a Location label ("" = no location), None = any
         self.label_of: Callable[[str, int, int], str | None] | None = None   # (path, mtime, size) → label
+        self.labelled = ""                           # "favorite" / "tagged" / "untagged": only those items (LABEL_FILTERS)
         self.folder_favs = ""                        # "show": only favorite folders; "hide": none of them (files stay)
         self.name_sizes = False                      # "Ireland (2.1 GB)": a folder's size after its name
         self.video_res = ""                          # VIDEO_RES_FILTERS / IMAGE_RES_FILTERS keys, and HDR only
@@ -4115,6 +4118,11 @@ class PaneModel(QSortFilterProxyModel):
     def set_folder_favs(self, mode: str) -> None:
         if mode != self.folder_favs:
             self.folder_favs = mode
+            self.invalidateFilter()
+
+    def set_labelled(self, which: str) -> None:
+        if which != self.labelled:
+            self.labelled = which
             self.invalidateFilter()
 
     def set_name_sizes(self, on: bool) -> None:
@@ -4149,7 +4157,7 @@ class PaneModel(QSortFilterProxyModel):
 
     def filtering(self) -> bool:
         return bool(self.size_filter is not None or self.type_filter or self.format_exts or self.place is not None
-                    or self.by_spec() or self.folder_favs)
+                    or self.by_spec() or self.folder_favs or self.labelled)
 
     def filterAcceptsRow(self, row: int, parent: QModelIndex) -> bool:  # noqa: N802
         if self.hide_motion and LIVE is not None and LIVE.any():
@@ -4163,6 +4171,13 @@ class PaneModel(QSortFilterProxyModel):
             return True                              # never the listed folder's own ancestors
         idx = src.index(row, 0, parent)
         is_dir = src.isDir(idx)
+        if self.labelled:                            # files and folders alike: favorited / carrying a tag / carrying none
+            path = src.filePath(idx)
+            if self.labelled == "favorite":
+                if "favorite" not in labels_of(path):
+                    return False
+            elif bool(tag_store().tags(path, fresh=False)) != (self.labelled == "tagged"):
+                return False
         if self.folder_favs and is_dir:              # folders only: the files beside them are left as they are
             fav = "favorite" in labels_of(src.filePath(idx))
             if fav != (self.folder_favs == "show"):
@@ -4497,6 +4512,7 @@ class Pane(QWidget):
         self.model.name_sizes = self.model.show_sizes and settings.value(f"{role}/name_sizes", "false") == "true"
         self.size_filter_key = ""
         self.folder_fav_key = ""                    # "show" / "hide": favorite folders only, or none of them
+        self.label_filter_key = ""                  # "favorite" / "tagged" / "untagged": only those items
         # The iPhone's Type, Format and Location filters (`_filter_menu`). Type, Format and size stay as you move
         # from folder to folder; a Location is the listing's own, so it's cleared when you leave.
         self.type_filter_key = ""
@@ -4578,7 +4594,7 @@ class Pane(QWidget):
         self.search.installEventFilter(self)
         h.addWidget(self.search)
         h.addSpacing(2)
-        self.filter_btn = self._tool("funnel", "Filter — favorite folders, type, format, resolution, HDR, location, "
+        self.filter_btn = self._tool("funnel", "Filter — favorites, tagged, type, format, resolution, HDR, location, "
                                      "size", None, "Nav")
         self.filter_btn.setMenu(self._filter_menu())
         self.filter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -4853,6 +4869,18 @@ class Pane(QWidget):
         or to a search's or collection's results."""
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
+        self.label_menu, self.label_actions = self._choice_menu(menu, LABEL_FILTERS, self.set_label_filter)
+        self.label_menu.setToolTipsVisible(True)
+        for key, tip in (("favorite", "Only what you've favorited here — files and folders"),
+                         ("tagged", "Only what carries a tag here — files and folders"),
+                         ("untagged", "Only what carries no tag here")):
+            self.label_actions[key].setToolTip(tip)
+        self.label_menu.addSeparator()
+        self.deep_fav_act = self.label_menu.addAction("Favorites in Subfolders Too", lambda: self.search_here("is:favorite"))
+        self.deep_fav_act.setToolTip("Every favorite in this folder and in the folders inside it, as a list")
+        self.deep_tag_act = self.label_menu.addAction("Tagged Items in Subfolders Too", lambda: self.search_here("is:tagged"))
+        self.deep_tag_act.setToolTip("Everything carrying a tag in this folder and in the folders inside it, as a list")
+        self.label_menu.aboutToShow.connect(self._label_menu_opened)
         self.folder_fav_menu, self.folder_fav_actions = self._choice_menu(menu, FOLDER_FAV_FILTERS,
                                                                           self.set_folder_favs)
         self.folder_fav_menu.setToolTipsVisible(True)
@@ -4941,6 +4969,27 @@ class Pane(QWidget):
         self.place_filter = label
         self._filters_changed()
 
+    def set_label_filter(self, key: str) -> None:
+        """Filter ▸ Show: Favorites, Tagged or Not Tagged — only those items of the listing (or of a search's
+        results), files and folders alike. What's in the folders inside isn't looked at: that's "… in Subfolders
+        Too" (`search_here`)."""
+        self.label_filter_key = key if key in dict(LABEL_FILTERS) else ""
+        self._filters_changed()
+
+    def _label_menu_opened(self) -> None:
+        real = not self.is_virtual and bool(self.location) and os.path.isdir(self.location)
+        for a in (self.deep_fav_act, self.deep_tag_act):
+            a.setEnabled(real)
+
+    def search_here(self, text: str) -> None:
+        """A search of this folder and everything inside it for `text` ("is:favorite", "is:tagged") — the results
+        page, with Back to return."""
+        if self.is_virtual or not self.location:
+            return
+        self.scope_folder.setChecked(True)
+        self.search.setText(text)
+        self.run_search()
+
     def set_folder_favs(self, key: str) -> None:
         """Filter ▸ Folders: Show Favorites (of the folders, only the favorited ones) or Hide Favorites (every
         folder but those). Folders only — the files in the listing aren't touched."""
@@ -4990,6 +5039,7 @@ class Pane(QWidget):
         self.video_res_key = self.image_res_key = ""
         self.hdr_only = False
         self.folder_fav_key = ""
+        self.label_filter_key = ""
         self.place_filter = None
         if self.size_filter_key:
             self.set_size_filter("")
@@ -4997,11 +5047,13 @@ class Pane(QWidget):
 
     def any_filter(self) -> bool:
         return bool(self.type_filter_key or self.format_filter_key or self.place_filter is not None
-                    or self.size_filter_key or self.res_filtering() or self.folder_fav_key)
+                    or self.size_filter_key or self.res_filtering() or self.folder_fav_key or self.label_filter_key)
 
     def filter_summary(self) -> str:
         """What the filters let through, for the status line ("photos · HEIF · Hauppauge, NY")."""
         parts = []
+        if self.label_filter_key:
+            parts.append({"favorite": "favorites", "tagged": "tagged", "untagged": "not tagged"}[self.label_filter_key])
         if self.folder_fav_key:
             parts.append("favorite folders only" if self.folder_fav_key == "show" else "favorite folders hidden")
         if self.type_filter_key:
@@ -5030,10 +5082,13 @@ class Pane(QWidget):
                 specs().ready.connect(self._specs_in, Qt.ConnectionType.QueuedConnection)
             self.model.set_res_filters(self.video_res_key, self.image_res_key, self.hdr_only)
             self.model.set_folder_favs(self.folder_fav_key)
+            self.model.set_labelled(self.label_filter_key)
         if not hasattr(self, "type_menu"):
             return
         self.folder_fav_actions[self.folder_fav_key].setChecked(True)
         self.folder_fav_menu.setTitle(f"Folders: {dict(FOLDER_FAV_FILTERS)[self.folder_fav_key]}")
+        self.label_actions[self.label_filter_key].setChecked(True)
+        self.label_menu.setTitle(f"Show: {dict(LABEL_FILTERS)[self.label_filter_key]}")
         self.type_actions[self.type_filter_key].setChecked(True)
         self.format_actions[self.format_filter_key].setChecked(True)
         self.video_res_actions[self.video_res_key].setChecked(True)
@@ -5050,7 +5105,7 @@ class Pane(QWidget):
         on = self.any_filter()
         self.clear_filters_act.setEnabled(on)
         self.filter_btn.setToolTip(f"Showing: {self.filter_summary()} — click to change" if on else
-                                   "Filter — favorite folders, type, format, resolution, HDR, location, size")
+                                   "Filter — favorites, tagged, type, format, resolution, HDR, location, size")
         self.filter_btn.setIcon(glyph("funnel", THEME.accent if on else THEME.secondary, 16))
         self._status_soon.start()
 
@@ -8777,7 +8832,7 @@ class Pane(QWidget):
         drops the files that no longer carry it."""
         self.grid.viewport().update()
         self.list.viewport().update()
-        if self.folder_fav_key:                            # a folder favorited or unfavorited: it comes or goes
+        if self.folder_fav_key or self.label_filter_key:   # favorited, unfavorited, tagged, untagged: it comes or goes
             self.model.invalidateFilter()
         if self.location.startswith(TAG):
             tag = self.location[len(TAG):]
