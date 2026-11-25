@@ -1720,6 +1720,29 @@ with Xcode's command line tools), which then goes first. If neither can read it,
 (“the site answered 403 Forbidden”, “its certificate couldn't be checked …”, “it didn't answer within 30
 seconds”).
 
+### Randomized Clean Up (`cleanup.py`, `cleanup_window.py`)
+
+The iPhone app's Randomized Clean Up. Right-click a folder ▸ **Randomized Clean Up…** (or Photos ▸ Randomized
+Clean Up…, ⇧⌘U): its photos and videos come up one at a time in the viewer, in shuffled order, with three big
+buttons under the picture:
+
+| | Key | What it does |
+|---|---|---|
+| **Delete** | ⌫ (or X, 1) | Marks it for the Trash. **Nothing is deleted yet.** |
+| **Keep** | → (or K, 2) | Keeps it, and on to the next. |
+| **Favorite** | F (or H, 3) | Keeps it and makes it a Favorite (on the iPhone too). |
+
+**←** (or Back) goes to the one before — it shows the answer you gave, and you can change it. **⌘Z** (Undo) takes
+the last answer back. The line at the top of the bar and "12 of 240 · 3 to delete" say how far along you are.
+
+**Done** — or closing the window, or answering the last one — brings the finish: everything you marked, as
+pictures. Click any to keep it after all, then **Move N to Trash**. That is the only moment anything is deleted,
+and it goes to the Trash, where Undo (⌘Z in the main window) or the Trash itself puts it back. **Not Now** closes
+without deleting and remembers the marks; **Keep Reviewing** goes back.
+
+Stop whenever you like: the next Clean Up of that folder leaves out what you've already kept and picks up where
+you stopped. The bar's **⋯** has **Include Subfolders**, **Random Order** and **Start Over…**.
+
 ### Edit with AI, Create with AI and the Astria.ai Browser (`ai_window.py`, `astria.py`)
 
 The iPhone app's cloud AI (astria.ai), on the Mac. It's opt-in: until you add your Astria API key nothing is

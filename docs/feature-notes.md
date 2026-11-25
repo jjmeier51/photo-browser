@@ -2135,6 +2135,66 @@ ExifTool, Save not saving twice, the windows closing their viewers, the pending 
 the bulk rule and the browser's tick and menu, and the Dock's sequence of states. **Not run on a Mac**, and
 nothing was sent to Astria (the browser's filter was fed made-up prompts).
 
+## 6bb. Randomized Clean Up on the Mac — `mac/cleanup.py`, `mac/cleanup_window.py`, `media_viewer.Triage` (Nov 25, 2026)
+
+**Asked for:** the iPhone's Randomized Clean Up, built into the Mac app — "slicker and more intuitive".
+
+**The iPhone's** (`FrameCleanupView`): a stack of cards — a folder's photos and videos one at a time, shuffled;
+swipe left = delete (straight to Recently Deleted), up = keep, down = favorite; what's been decided is
+remembered per folder (`cleanupReviewed`) so a later run resumes; the card can be moved or copied elsewhere and
+tagged.
+
+**The Mac's** keeps the three answers and the memory and changes the one thing a desktop can do better: **a
+"delete" is a mark, not a deletion.** Nothing leaves the folder while you go through it, so every answer can be
+taken back, and one screen at the end shows exactly what's marked before a single press moves it to the Trash.
+
+- **Where:** right-click a folder (or a folder's empty space) ▸ **Randomized Clean Up…**; Photos ▸ Randomized
+  Clean Up… (⇧⌘U) for the folder selected or the one you're in. → `Pane.clean_up(folder)`.
+- **It runs in the viewer** — the real one, so HDR photos, videos (playing, with the scrubber), Live Photos, zoom
+  and Info are all as usual — with a bar under the picture (`media_viewer.Triage` through `Hooks.triage`,
+  `MediaViewer._triage_bar`): a thin progress line, **Back** and **Undo**, the three answers as big buttons that
+  say their keys — **Delete ⌫ · Keep → · Favorite F** — "12 of 240 · 3 to delete", ⋯ and **Done**. The bar never
+  fades (the other bars still do). The ♡ and bin buttons at the top are hidden there: the bar's are the ones.
+- **Keys:** Delete = ⌫ (also X, 1, ⌘D); Keep = → (also K, 2, Space on a photo, a swipe on); Favorite = F (also H,
+  3); ← = back to the one before, to look again or change its answer (it shows the answer it has); ⌘Z = undo the
+  last answer, with that item back on show. After an answer the viewer goes to the next item *without* one. → on
+  an item that already has an answer just passes it. (F is Full Screen in an ordinary viewer; in Clean Up that's
+  in ⋯ and the green button. 1 / 2 / 3, K, X, H, ⌫ and ⌘Z do nothing in an ordinary viewer.)
+- **Favorite** is the app's Favorite label (shared with the iPhone), set at once and quietly; undoing or
+  changing the answer takes it off again only if Clean Up put it on (`Session._ours`).
+- **The finish** (`cleanup_window.Finish`) comes from Done, from closing the window, or by itself when the last
+  item is answered: "20 kept · 5 favorites · 12 marked for the Trash · 203 still to look at", the marked ones as
+  thumbnails, each ticked — click any to keep it instead — and **Move N to Trash** (the app's own Trash:
+  `Pane._trash_now`, split out of `_viewer_trash` — Live Photo movies go along, tags and labels are kept for
+  the put-back, a toast with **Undo**). **Keep Reviewing** goes back; **Not Now** closes and *keeps the marks
+  with the folder* for next time; **Review Again** (when everything's been looked at) starts the folder afresh.
+  With nothing marked and items left, closing just pauses — no screen, a line saying where it stopped.
+- **It resumes.** `cleanup.Store` (`cleanup.json` in the app's Application Support, by folder): what was kept or
+  favorited isn't shown again; what was marked and not acted on is carried into the next finish screen ("3
+  marked last time"). Files that have gone are forgotten. It's the Mac's own record — the iPhone's
+  `cleanupReviewed` lives in the phone and isn't shared, so each app remembers its own progress.
+- **⋯ options** (remembered): **Include Subfolders** (default off — the iPhone's is the folder's own items; a
+  folder that holds only folders looks inside them without being asked), **Random Order** (off = by name, the
+  folder's own first), **Start Over…**. Changing one gathers again; answers so far stay.
+- Hidden items and files that aren't photos or videos are never in it; a Live Photo's movie isn't an item (it
+  goes with its photo). The gather runs off the window's thread.
+
+Code: `cleanup.py` is the arithmetic with no windows (`Session`: queue, answers, undo, `marked`, `next_open`,
+`counts`, `gone`, `start_over`; `Store`; `gather`). `cleanup_window.CleanupRun` runs one Clean Up (gather →
+session → viewer → finish) and is kept in `photo_browser._CLEANUPS` while alive; asking again for a folder that
+has one open brings its window forward. The viewer's `closeEvent` hands a Clean Up's close to `triage_done`, and
+`end_triage()` is how the run lets the window go.
+
+**Not carried over from the iPhone:** Move / Copy the current item to another folder from inside Clean Up (the
+Mac's move goes through the transfer engine and its bar — not wired in here); the iMessage quick-sort chips.
+Tags are there as in any viewer (⋯ ▸ Tags…, ⌘T).
+
+**Tested offscreen** (`ui2/t_cleanup.py`, 43 checks, with screenshots of the bar and the finish): the
+arithmetic (shuffle, answers, undo, favorites put on and taken off, carried marks, resume, Start Over), then the
+whole flow in the app on a folder of photos and a video — every key, Back and changing an answer, Done part-way
+with one unticked, the Trash, resuming, pausing by closing, the automatic finish, Not Now, Review Again, the
+options, a folder of folders, an empty one — and that an ordinary viewer is unchanged. **Not run on a Mac.**
+
 ## 6w-3. Make Book: pictures beside the text, placed and sized freely, on a live page — `mac/bookify.py`, `mac/book_pictures.py` (Nov 23, 2026)
 
 **Asked for:** "allowing the user to embed pictures next to text/paragraphs. Give the user full autonomy as to

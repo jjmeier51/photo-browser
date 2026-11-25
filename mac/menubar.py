@@ -454,6 +454,9 @@ def install(win, sf) -> None:
     act(t, "Find People…", lambda: pane().open_people(folder_target()), None, folder_target,
         "Finds the faces in the photos of the selected folder (or this one) and groups them into people — on this "
         "Mac; you give the names")
+    act(t, "Randomized Clean Up…", lambda: pane().clean_up(folder_target()), "Ctrl+Shift+U", folder_target,
+        "This folder's photos and videos one at a time, in shuffled order: Delete, Keep or Favorite each — the "
+        "iPhone app's Randomized Clean Up. Nothing is deleted until you finish and say so")
     act(t, "Find Duplicates…", lambda: pane().find_duplicates(dup_target()), None, dup_target,
         "Likely copies in the selected folder or folders (or this one)")
     t.addSeparator()

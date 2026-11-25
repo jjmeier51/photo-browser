@@ -69,7 +69,7 @@ from PySide6.QtGui import (QAction, QColor, QCursor, QDesktopServices, QFont, QF
                            QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QGraphicsPixmapItem, QGraphicsScene,
                                QGraphicsView, QHBoxLayout,
-                               QLabel, QMenu, QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedLayout,
+                               QLabel, QMenu, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedLayout,
                                QStackedWidget, QStyle, QStyleOptionSlider, QToolButton, QToolTip, QVBoxLayout,
                                QWidget)
 
@@ -125,7 +125,22 @@ class Hooks:
     shown: Callable[[str], None] | None = None                # the viewer moved to this file (the pane's highlight follows)
     live_motion: Callable[[str], str] | None = None           # a photo → its Live Photo's movie ("" — it isn't one)
     review: "Review | None" = None                            # results not saved yet: Save / Discard in the bar
+    triage: "Triage | None" = None                            # Clean Up: Delete / Keep / Favorite under the picture
     extra: dict = field(default_factory=dict)
+
+
+@dataclass
+class Triage:
+    """Clean Up (cleanup.py, cleanup_window.py): the items are gone through one at a time and each gets an answer
+    — "delete", "keep" or "favorite". The viewer then has a bar under the picture with the three answers (and
+    their keys), Back, Undo and how far along it is; whoever opened it keeps the answers and does the rest."""
+    state: Callable[[str], str]               # the item's answer: "" (none yet), "delete", "keep", "favorite"
+    decide: Callable[[str, str], None]        # (path, answer)
+    undo: Callable[[], str]                   # the last answer taken back → its item ("" — nothing to undo)
+    counts: Callable[[], dict]                # {"total", "decided", "left", "delete", "keep", "favorite"}
+    done: Callable[[], None]                  # Done, the window's close, or the last item answered
+    menu: Callable[[QMenu], None] | None = None   # the bar's ⋯: options, filled each time it opens
+    title: str = "Clean Up"
 
 
 @dataclass
@@ -514,6 +529,15 @@ def icon(name: str, color: str = "#F2F2F7", size: int = 18) -> QIcon:
         p.drawLine(QPointF(s * 0.24, s * 0.5), QPointF(s * 0.76, s * 0.5))
         if name == "plus":
             p.drawLine(QPointF(s * 0.5, s * 0.24), QPointF(s * 0.5, s * 0.76))
+    elif name == "check":
+        p.setPen(QPen(c, 2.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawPolyline([QPointF(s * 0.22, s * 0.54), QPointF(s * 0.42, s * 0.74), QPointF(s * 0.8, s * 0.28)])
+    elif name == "undo":                                      # an arrow curling back
+        arc = QPainterPath()
+        arc.moveTo(s * 0.3, s * 0.4)
+        arc.cubicTo(s * 0.62, s * 0.26, s * 0.86, s * 0.5, s * 0.66, s * 0.76)
+        p.drawPath(arc)
+        p.drawPolyline([QPointF(s * 0.44, s * 0.22), QPointF(s * 0.28, s * 0.4), QPointF(s * 0.48, s * 0.52)])
     p.end()
     return QIcon(pm)
 
@@ -1301,6 +1325,27 @@ QToolButton#ViewerLive {{ color: #F2F2F7; background: rgba(255,255,255,0.10); bo
                           border-radius: 9px; padding: 1px 8px; font-size: 11px; font-weight: 700; }}
 QToolButton#ViewerLive:hover, QToolButton#ViewerLive:checked {{ background: rgba(255,214,10,0.30);
                                                                  border-color: #FFD60A; color: #FFD60A; }}
+#TriageBar {{ background: #0B0B0C; border: none; border-top: 1px solid #1F1F22; }}
+#TriageBar QLabel {{ color: #C7C7CC; background: transparent; font-size: 12px; }}
+QProgressBar#TriProgress {{ background: #1C1C1E; border: none; max-height: 3px; min-height: 3px; }}
+QProgressBar#TriProgress::chunk {{ background: #0A84FF; }}
+QToolButton#TriAnswer {{ color: #F2F2F7; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.16);
+                         border-radius: 10px; padding: 8px 16px; font-size: 13px; font-weight: 600; min-width: 112px; }}
+QToolButton#TriAnswer:hover {{ background: rgba(255,255,255,0.15); }}
+QToolButton#TriAnswer[answer="delete"]:hover {{ border-color: #FF453A; }}
+QToolButton#TriAnswer[answer="keep"]:hover {{ border-color: #30D158; }}
+QToolButton#TriAnswer[answer="favorite"]:hover {{ border-color: #FF375F; }}
+QToolButton#TriAnswer[answer="delete"]:checked {{ background: #FF453A; border-color: #FF453A; color: white; }}
+QToolButton#TriAnswer[answer="keep"]:checked {{ background: #30D158; border-color: #30D158; color: white; }}
+QToolButton#TriAnswer[answer="favorite"]:checked {{ background: #FF375F; border-color: #FF375F; color: white; }}
+QToolButton#TriSmall {{ color: #E5E5EA; background: transparent; border: 1px solid rgba(255,255,255,0.16);
+                        border-radius: 8px; padding: 5px 11px; font-size: 12px; }}
+QToolButton#TriSmall:hover {{ background: rgba(255,255,255,0.13); }}
+QToolButton#TriSmall:disabled {{ color: #5A5A5E; border-color: rgba(255,255,255,0.07); }}
+QToolButton#TriSmall::menu-indicator {{ image: none; width: 0; }}
+QToolButton#TriDone {{ color: white; background: #0A84FF; border: none; border-radius: 8px; padding: 6px 14px;
+                       font-size: 12px; font-weight: 600; }}
+QToolButton#TriDone:hover {{ background: #3D9BFF; }}
 QToolButton#ViewerSave {{ color: white; background: #0A84FF; border: none; border-radius: 7px;
                           padding: 4px 12px; font-size: 12px; font-weight: 600; }}
 QToolButton#ViewerSave:hover {{ background: #3D9BFF; }}
@@ -1513,12 +1558,12 @@ class MediaViewer(QWidget):
         self.hdr = _NativeStage() if viewer_surface.wanted() else None
         if self.hdr is not None:
             self.stack.addWidget(self.hdr)
-            self.hdr.swiped.connect(self.go)
+            self.hdr.swiped.connect(self._nav)
             self.hdr.tapped.connect(self.toggle_chrome)
             self.hdr.zoom_changed.connect(self._zoom_label)
             self.hdr.picture_done.connect(self._hdr_shown)
-        self.image.swiped.connect(self.go)
-        self.video.swiped.connect(self.go)
+        self.image.swiped.connect(self._nav)
+        self.video.swiped.connect(self._nav)
         self.image.tapped.connect(self.toggle_chrome)
         self.video.tapped.connect(self.toggle_chrome)
         self.video.ended.connect(self._video_ended)
@@ -1548,8 +1593,12 @@ class MediaViewer(QWidget):
         column = QVBoxLayout()
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
+        self.triage_bar = self._triage_bar() if self.hooks.triage is not None else None
+        self._triage_closing = False
         column.addWidget(self.top)
         column.addWidget(self.stack, 1)
+        if self.triage_bar is not None:
+            column.addWidget(self.triage_bar)              # (never faded or hidden: it's what the window is for)
         column.addWidget(self.bottom)
         body = QHBoxLayout(self)
         body.setContentsMargins(0, 0, 0, 0)
@@ -1721,8 +1770,8 @@ class MediaViewer(QWidget):
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(2)
-        self.prev_btn = _bar_button("", "Previous (←)", lambda: self.go(-1), "prev")
-        self.next_btn = _bar_button("", "Next (→)", lambda: self.go(1), "next")
+        self.prev_btn = _bar_button("", "Previous (←)", lambda: self._nav(-1), "prev")
+        self.next_btn = _bar_button("", "Next (→)", lambda: self._nav(1), "next")
         row.addWidget(self.prev_btn)
         row.addWidget(self.next_btn)
         row.addStretch(1)
@@ -1795,9 +1844,9 @@ class MediaViewer(QWidget):
         return panel
 
     def _shortcuts(self) -> None:
-        for keys, slot in (("Left", lambda: self.go(-1)), ("Right", lambda: self.go(1)), ("Escape", self._escape),
+        for keys, slot in (("Left", lambda: self._nav(-1)), ("Right", lambda: self._nav(1)), ("Escape", self._escape),
                            ("Down", self.close), ("Up", self.toggle_info), ("I", self.toggle_info),
-                           ("F", self.toggle_full), ("S", self.toggle_slideshow), ("Space", self._space),
+                           ("F", self._key_f), ("S", self.toggle_slideshow), ("Space", self._space),
                            ("J", lambda: self.video.skip(-15)), ("L", lambda: self.video.skip(15)),
                            (",", lambda: self.step_frame(-1)), (".", lambda: self.step_frame(1)),
                            ("Shift+Left", lambda: self.step_frame(-1)), ("Shift+Right", lambda: self.step_frame(1)),
@@ -1806,7 +1855,13 @@ class MediaViewer(QWidget):
                            ("=", lambda: self.zoom(1.25)), ("-", lambda: self.zoom(0.8)),
                            ("0", self.fit_current), ("Ctrl+Shift+F", lambda: self.toggle_label("favorite")),
                            ("Ctrl+Shift+A", lambda: self.toggle_label("ai")), ("Ctrl+Shift+X", self.toggle_to_delete),
-                           ("Ctrl+S", self.review_save), ("Ctrl+D", self._cmd_d)):
+                           ("Ctrl+S", self.review_save), ("Ctrl+D", self._cmd_d),
+                           # Clean Up (hooks.triage) — nothing happens on these in an ordinary viewer
+                           ("Backspace", lambda: self.triage_answer("delete")), ("Delete", lambda: self.triage_answer("delete")),
+                           ("X", lambda: self.triage_answer("delete")), ("1", lambda: self.triage_answer("delete")),
+                           ("K", lambda: self.triage_answer("keep")), ("2", lambda: self.triage_answer("keep")),
+                           ("H", lambda: self.triage_answer("favorite")), ("3", lambda: self.triage_answer("favorite")),
+                           ("Ctrl+Z", self.triage_undo)):
             sc = QShortcut(QKeySequence(keys), self)
             sc.activated.connect(slot)
 
@@ -1931,7 +1986,23 @@ class MediaViewer(QWidget):
         elif self._live:
             self.play_live()
         else:
-            self.go(1)
+            self._nav(1)
+
+    def _nav(self, step: int) -> None:
+        """← / → (keys, swipes, the bar's arrows). In Clean Up, → is "keep this and go on" for an item with no
+        answer yet, and ← goes back to the one before, to look again or change its answer."""
+        if self.hooks.triage is None:
+            self.go(step)
+        elif step > 0:
+            self.triage_forward()
+        else:
+            self.triage_back()
+
+    def _key_f(self) -> None:
+        if self.hooks.triage is not None:
+            self.triage_answer("favorite")                # (Full Screen is in ⋯ and the window's green button)
+        else:
+            self.toggle_full()
 
     # ------------------------------------------------------------------ Live Photos
     def _motion_of(self, path: str) -> str:
@@ -2048,7 +2119,8 @@ class MediaViewer(QWidget):
         return QSize(int(info.get("width") or 0), int(info.get("height") or 0))
 
     def _chrome_height(self) -> int:
-        return (self.top.sizeHint().height() + self.bottom.sizeHint().height()) if self.chrome else 0
+        bars = (self.top.sizeHint().height() + self.bottom.sizeHint().height()) if self.chrome else 0
+        return bars + (self.triage_bar.sizeHint().height() if self.triage_bar is not None else 0)
 
     def _title_height(self) -> int:
         """The title bar's height: the window's own once it's up, else the usual one."""
@@ -2081,7 +2153,8 @@ class MediaViewer(QWidget):
         scale = min(room_w / ms.width(), room_h / ms.height())
         w, h = max(1, round(ms.width() * scale)), max(1, round(ms.height() * scale))
         min_w = max(self.minimumWidth(), self.bottom.minimumSizeHint().width() if self.chrome else 0,
-                    self.top.minimumSizeHint().width() if self.chrome else 0)
+                    self.top.minimumSizeHint().width() if self.chrome else 0,
+                    self.triage_bar.minimumSizeHint().width() if self.triage_bar is not None else 0)
         target = QSize(max(w + info_w, min_w), max(h + chrome_h, self.minimumHeight()))
         if target == self.size() and self.isVisible() and not first:
             return
@@ -2373,6 +2446,7 @@ class MediaViewer(QWidget):
         if self._review_state():
             return
         self._show_to_delete()
+        self._show_triage()
         if self.hooks.labels_of is None:
             return
         have = self.hooks.labels_of(self.current) if self.paths else []
@@ -2399,11 +2473,197 @@ class MediaViewer(QWidget):
     def _cmd_d(self) -> None:
         """⌘D: the "to-delete" tag on the photo or video on show (again: off) — the bin beside ♡. On results that
         aren't files yet (Edit / Create with AI's, with Save and Discard in the bar) it's Discard instead: there is
-        nothing to tag."""
-        if self._review_state():
+        nothing to tag. In Clean Up it's that screen's Delete."""
+        if self.hooks.triage is not None:
+            self.triage_answer("delete")
+        elif self._review_state():
             self.review_discard()
         else:
             self.toggle_to_delete()
+
+    # -- Clean Up (hooks.triage): an answer for every item
+    def _triage_bar(self) -> QWidget:
+        """Under the picture: how far along, then Back and Undo, the three answers with their keys, the count,
+        options and Done. It's the one bar that never fades — the window is about these buttons."""
+        bar = QFrame(self)
+        bar.setObjectName("TriageBar")
+        col = QVBoxLayout(bar)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        self.tri_progress = QProgressBar()
+        self.tri_progress.setObjectName("TriProgress")
+        self.tri_progress.setTextVisible(False)
+        col.addWidget(self.tri_progress)
+        row = QHBoxLayout()
+        row.setContentsMargins(12, 9, 12, 9)
+        row.setSpacing(8)
+
+        def small(text: str, tip: str, slot, glyph: str = "") -> QToolButton:
+            b = QToolButton()
+            b.setObjectName("TriSmall")
+            b.setText(text)
+            if glyph:
+                b.setIcon(icon(glyph, "#E5E5EA", 14))
+                b.setIconSize(QSize(14, 14))
+                b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            b.setToolTip(tip)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            if slot is not None:
+                b.clicked.connect(slot)
+            return b
+
+        self.tri_back = small("Back", "The one before — to look again, or change its answer (←)", self.triage_back, "prev")
+        self.tri_undo = small("Undo", "Take back the last answer (⌘Z)", self.triage_undo, "undo")
+        row.addWidget(self.tri_back)
+        row.addWidget(self.tri_undo)
+        row.addStretch(1)
+        self.tri_btns: dict[str, QToolButton] = {}
+        for what, text, key, glyph, color, tip in (
+                ("delete", "Delete", "⌫", "bin", TO_DELETE_RED,
+                 "Mark it for the Trash — nothing is deleted until you finish and say so (⌫, X or 1)"),
+                ("keep", "Keep", "→", "check", "#30D158", "Keep it, and on to the next (→, K or 2)"),
+                ("favorite", "Favorite", "F", "heart.fill", FAVORITE_RED,
+                 "Keep it and make it a Favorite — on the iPhone too (F, H or 3)")):
+            b = QToolButton()
+            b.setObjectName("TriAnswer")
+            b.setProperty("answer", what)
+            b.setText(f"{text}   {key}")
+            b.setIcon(icon(glyph, color, 16))
+            b.setIconSize(QSize(16, 16))
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(lambda _=False, w=what: self.triage_answer(w))
+            self.tri_btns[what] = b
+            row.addWidget(b)
+        row.addStretch(1)
+        self.tri_count = QLabel()
+        self.tri_count.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        row.addWidget(self.tri_count)
+        self.tri_more = small("", "Options", None, "more")
+        self.tri_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self.tri_more)
+        menu.setToolTipsVisible(True)
+        menu.aboutToShow.connect(lambda m=menu: (m.clear(), self.hooks.triage.menu(m)) if self.hooks.triage.menu else None)
+        self.tri_more.setMenu(menu)
+        self.tri_more.setVisible(self.hooks.triage.menu is not None)
+        row.addWidget(self.tri_more)
+        self.tri_done = small("Done", "Finish: see what's marked, and move it to the Trash — or carry on later", self.triage_done)
+        self.tri_done.setObjectName("TriDone")
+        row.addWidget(self.tri_done)
+        col.addLayout(row)
+        return bar
+
+    def _triage_state(self, path: str | None = None) -> str:
+        t = self.hooks.triage
+        if t is None or not self.paths:
+            return ""
+        try:
+            return t.state(self.current if path is None else path) or ""
+        except Exception:  # noqa: BLE001 — whoever kept the answers has gone
+            return ""
+
+    def _show_triage(self) -> None:
+        if self.triage_bar is None:
+            return
+        state = self._triage_state()
+        for what, b in self.tri_btns.items():
+            b.setChecked(what == state)
+        try:
+            n = self.hooks.triage.counts()
+            can_undo = bool(n.get("can_undo", True))
+        except Exception:  # noqa: BLE001
+            n, can_undo = {}, False
+        total, decided = int(n.get("total", len(self.paths)) or 0), int(n.get("decided", 0) or 0)
+        self.tri_progress.setRange(0, max(1, total))
+        self.tri_progress.setValue(decided)
+        marked = int(n.get("delete", 0) or 0)
+        self.tri_count.setText(f"{decided:,} of {total:,}" + (f"  ·  {marked:,} to delete" if marked else ""))
+        self.tri_count.setToolTip(f"{int(n.get('keep', 0) or 0):,} kept · {int(n.get('favorite', 0) or 0):,} favorites · "
+                                  f"{marked:,} marked for the Trash · {int(n.get('left', 0) or 0):,} still to look at")
+        self.tri_back.setEnabled(self.index > 0)
+        self.tri_undo.setEnabled(can_undo)
+        for b in (self.fav_btn, self.del_btn):                    # the bar's Favorite and Delete are the ones here
+            b.setVisible(False)
+        said = {"delete": "marked for the Trash", "keep": "kept", "favorite": "kept as a Favorite"}.get(state)
+        self.title.setText(os.path.basename(self.current) + (f"  —  {said}" if said else ""))
+
+    def triage_answer(self, what: str) -> None:
+        """Delete / Keep / Favorite for the item on show (the same again leaves it as it is), then on to the next
+        one without an answer — or, when that was the last, the finish."""
+        t = self.hooks.triage
+        if t is None or not self.paths:
+            return
+        path = self.current
+        try:
+            t.decide(path, what)
+        except Exception as e:  # noqa: BLE001 — said, never a crash
+            self.say(f"Couldn't do that: {e}")
+            return
+        said = {"delete": "Marked for the Trash — nothing is deleted until you finish.", "keep": "Kept.",
+                "favorite": "Kept as a Favorite."}[what]
+        self._triage_advance(said)
+
+    def _triage_advance(self, said: str = "") -> None:
+        n = len(self.paths)
+        for step in range(1, n + 1):
+            j = (self.index + step) % n
+            if not self._triage_state(self.paths[j]):
+                self.index = j
+                self.show_current()
+                if said:
+                    self.say(said)
+                return
+        self._show_triage()                                   # every one has an answer: the finish
+        if said:
+            self.say(said)
+        QTimer.singleShot(0, self.triage_done)
+
+    def triage_forward(self) -> None:
+        """→: an item with no answer is kept; one that has an answer (after going back) is just passed."""
+        if not self._triage_state():
+            self.triage_answer("keep")
+        elif self.index < len(self.paths) - 1:
+            self.index += 1
+            self.show_current()
+        else:
+            self._triage_advance()
+
+    def triage_back(self) -> None:
+        if self.hooks.triage is not None and self.index > 0:
+            self.index -= 1
+            self.show_current()
+
+    def triage_undo(self) -> None:
+        """⌘Z: the last answer taken back, and that item on show again."""
+        t = self.hooks.triage
+        if t is None:
+            return
+        try:
+            path = t.undo()
+        except Exception:  # noqa: BLE001
+            path = ""
+        if path and path in self.paths:
+            self.index = self.paths.index(path)
+            self.show_current()
+            self.say("Taken back — choose again.")
+        else:
+            self._show_triage()
+
+    def triage_done(self) -> None:
+        t = self.hooks.triage
+        if t is not None:
+            if is_video(self.current):
+                self.video.pause()
+            t.done()
+
+    def end_triage(self) -> None:
+        """Whoever runs the Clean Up is finished with this window: it closes without asking them again."""
+        self._triage_closing = True
+        self.close()
 
     def toggle_to_delete(self) -> None:
         """⌘D (⇧⌘X too) / the bin beside ♡: the "to-delete" tag on (or off) — nothing is deleted."""
@@ -2688,6 +2948,12 @@ class MediaViewer(QWidget):
             self.hooks.export_frames(self.current)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self.hooks.triage is not None and not self._triage_closing:
+            # Closing a Clean Up is its Done: what's marked is shown (and can go to the Trash) before the window
+            # does — `end_triage` is how whoever runs it lets the window go.
+            event.ignore()
+            QTimer.singleShot(0, self.triage_done)
+            return
         self._slide.stop()
         self.fade.timer.stop()
         self.video.release()

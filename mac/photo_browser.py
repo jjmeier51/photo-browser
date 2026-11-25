@@ -806,6 +806,7 @@ def open_social(kind: str, folder: str, parent: QWidget | None = None) -> None:
 
 _TIKTOK_WINDOWS: list = []
 _DEPOP_WINDOWS: list = []
+_CLEANUPS: list = []                 # Clean Ups under way (cleanup_window.CleanupRun)
 
 
 def app_windows() -> list[QWidget]:
@@ -6232,10 +6233,11 @@ class Pane(QWidget):
     def _is_fs_listing(self) -> bool:
         return not self.is_virtual
 
-    def view_media(self, path: str, among: list[str] | None = None, review=None):
+    def view_media(self, path: str, among: list[str] | None = None, review=None, triage=None):
         """The viewer (media_viewer.py — the iPhone's), on `path`, through `among` or the listing's photos and
         videos in the order shown. `review` (a `media_viewer.Review`): the items are results not saved yet — the
-        viewer gets Save and Discard. Returns the viewer."""
+        viewer gets Save and Discard. `triage` (a `media_viewer.Triage`): it's a Clean Up — Delete / Keep /
+        Favorite under the picture. Returns the viewer."""
         import frame_export
         import media_viewer
         items = among or [p for p in self.listing_paths() if kind_of(p) != "other"]
@@ -6259,7 +6261,7 @@ class Pane(QWidget):
             age_of=self._age_of,
             set_cover=self.cover_from_viewer, edit_photo=self.edit_photo,
             edit_with_ai=self.ai_edit, shown=self._follow_viewer, live_motion=live_motion_of,
-            review=review, extra={"frame_note": frame_export.engine_note})
+            review=review, triage=triage, extra={"frame_note": frame_export.engine_note})
         # Opens over Photo Browser for Mac's window, as tall as its display, and takes each item's shape within that.
         viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None, box=self.window().geometry())
         viewer.removed.connect(lambda _paths: self.refresh_results())
@@ -6458,6 +6460,11 @@ class Pane(QWidget):
         box.exec()
         if box.clickedButton() is not go:
             return False
+        return bool(self._trash_now(paths))
+
+    def _trash_now(self, paths: list[str]) -> list[str]:
+        """To the Trash, already agreed to (the viewer's question, Clean Up's finish screen): each with its Live
+        Photo movie, said in a toast with Undo, tags and labels kept for the put-back. Returns the ones that went."""
         paths = with_live_movies(paths)                   # a Live Photo's movie goes with its photo
         said = self._said_about(paths)
         went = [(p, MainWindow.trash_to(Path(p))) for p in paths]
@@ -6472,7 +6479,54 @@ class Pane(QWidget):
         self.refresh_results()
         if moved:
             self._trashed([(p, there or "") for p, there in went if there is not None], said)
-        return bool(moved)
+        return moved
+
+    # -- Clean Up (cleanup.py, cleanup_window.py): the iPhone's Randomized Clean Up
+    def clean_up(self, folder: str | None = None) -> None:
+        """Randomized Clean Up…: the folder's photos and videos one at a time, in shuffled order, each answered
+        Delete, Keep or Favorite in the viewer — and nothing deleted until the finish screen's one press."""
+        import cleanup_window
+        folder = folder or (self.location if not self.is_virtual else "")
+        if not folder or not os.path.isdir(folder):
+            return
+        for run in list(_CLEANUPS):                        # one at a time per folder: bring that one forward
+            if run.folder == folder and run.alive and run.viewer is not None:
+                try:
+                    run.viewer.raise_()
+                    run.viewer.activateWindow()
+                    return
+                except RuntimeError:
+                    pass
+
+        def thumb(p: str) -> QPixmap | None:
+            try:
+                return THUMBS.get(p, os.stat(p).st_mtime) if THUMBS is not None else None
+            except OSError:
+                return None
+
+        def favorite(p: str, on: bool) -> None:           # (quietly: Clean Up has its own Undo and its own count)
+            tag_store().set_label([p], "favorite", on)
+            tags_changed()
+
+        def skip(p: str) -> bool:                          # a Live Photo's movie is its photo's, not an item
+            if os.path.splitext(p)[1].lower() not in (".mov", ".mp4"):
+                return False
+            stem = os.path.splitext(p)[0]
+            for ext in (".heic", ".HEIC", ".jpg", ".JPG", ".jpeg", ".JPEG", ".png", ".PNG"):
+                if os.path.isfile(stem + ext):
+                    return live_motion_of(stem + ext) == p
+            return False
+
+        hooks = cleanup_window.CleanupHooks(
+            is_media=lambda p: kind_of(p) != "other",
+            view=lambda items, start, tri: self.view_media(start, among=items, triage=tri),
+            trash=self._trash_now, is_favorite=lambda p: "favorite" in labels_of(p), set_favorite=favorite,
+            thumb=thumb, thumbs_ready=THUMBS.ready if THUMBS is not None else None, skip=skip,
+            note=self._airdrop_noted, parent=self.window())
+        run = cleanup_window.CleanupRun(folder, hooks)
+        _CLEANUPS.append(run)
+        run.ended.connect(lambda r=run: _CLEANUPS.remove(r) if r in _CLEANUPS else None)
+        run.start()
 
     def export_frames(self, videos: list[str]) -> None:
         """Export All Frames… (frame_export.py — the iPhone's): one video or several, each into a folder
@@ -7860,6 +7914,7 @@ class Pane(QWidget):
                        lambda: self.cache_thumbnails(folder))
         menu.addAction("Find Live Photos Here…" if here else "Find Live Photos…",
                        lambda: self.find_live_photos(folder))
+        menu.addAction("Randomized Clean Up…", lambda: self.clean_up(folder))
         menu.addAction("Rename Files Here…" if here else "Rename Files Inside…", lambda: self.rename_many([folder]))
         menu.addAction("Remove Leading Spaces from Names Here…" if here else "Remove Leading Spaces from Names…",
                        lambda: self.remove_leading_spaces(folder))

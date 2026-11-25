@@ -287,6 +287,12 @@ actions the app makes no network calls.
   photos as references (`Pane.ai_create(folder, settings)`); (3) a Flux LoRA trained on Astria
   (`astria.Client.create_tune`, the iPhone's `createTune`). A person's model records consent; outputs are marked
   AI-made. `AIModel.nanoBananaPro` / "Nano Banana Pro" added to both apps' lists — §6ai.
+  **Randomized Clean Up** (right-click a folder / Photos menu ⇧⌘U; `mac/cleanup.py`, `mac/cleanup_window.py`, §6bb)
+  — the iPhone's, run **in the viewer** with a bar under the picture (`media_viewer.Triage` via `Hooks.triage`:
+  Delete ⌫ · Keep → · Favorite F, Back, Undo ⌘Z, Done). **A "delete" there is a mark, never a deletion**: files
+  go to the Trash only from the finish screen (`cleanup_window.Finish` → `Pane._trash_now`), after the person has
+  seen them and pressed Move N to Trash — keep it that way. Answers and marks are remembered per folder on the
+  Mac (`cleanup.Store`); a favorite is the shared Favorite label, taken off again on undo only if Clean Up put it on.
   **The Dock icon** (`photo_browser.on_app_state`, §6ba): "active" reported while already active is a Dock click
   (a reopen) → `raise_all_windows()` always; the pointer test is only for inactive → active. Don't go back to
   deciding by the pointer alone — a hidden Dock's icons sit over our windows.
